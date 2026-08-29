@@ -12,6 +12,7 @@ export const AgentTaskStatusSchema = z.enum([
   "completed",
   "failed",
   "cancelled", // Task was cancelled by lead or creator
+  "dead_letter", // Retry budget exhausted after repeated worker crashes
 ]);
 
 // ============================================================================
@@ -116,6 +117,13 @@ export const AgentTaskSchema = z.object({
   tags: z.array(z.string()).default([]), // e.g., ["urgent", "frontend"]
   priority: z.number().int().min(0).max(100).default(50),
   dependsOn: z.array(z.uuid()).default([]), // Task IDs this depends on
+
+  // Lease / retry accounting. A claimed task holds a lease that its worker must
+  // renew; if the lease expires the task is requeued rather than failed.
+  attempts: z.number().int().min(0).default(0),
+  maxAttempts: z.number().int().min(1).default(3),
+  leaseExpiresAt: z.iso.datetime().optional(),
+  leaseOwnerId: z.uuid().optional(),
 
   // Acceptance tracking
   offeredTo: z.uuid().optional(), // Agent the task was offered to

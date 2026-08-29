@@ -208,7 +208,7 @@ describe("Heartbeat Triage", () => {
   // ==========================================================================
 
   describe("Code-Level Triage", () => {
-    test("auto-fails stalled task with no active session", async () => {
+    test("requeues stalled task with no active session", async () => {
       const agent = createAgent({ name: "dead-worker", isLead: false, status: "busy" });
       const task = createTaskExtended("Stalled task", { agentId: agent.id });
       startTask(task.id);
@@ -219,17 +219,21 @@ describe("Heartbeat Triage", () => {
 
       const findings = await codeLevelTriage();
 
-      expect(findings.autoFailedTasks.length).toBe(1);
-      expect(findings.autoFailedTasks[0]!.taskId).toBe(task.id);
+      expect(findings.reclaimedTasks.length).toBe(1);
+      expect(findings.reclaimedTasks[0]!.taskId).toBe(task.id);
+      expect(findings.reclaimedTasks[0]!.outcome).toBe("requeued");
       expect(findings.stalledTasks.length).toBe(0);
 
-      // Verify task is actually failed in DB
+      // A dead worker is a scheduling event, not a task failure. The work goes
+      // back in the pool; the same sweep may immediately hand it to an available
+      // worker, so the task is runnable again either way — never discarded.
       const updated = getTaskById(task.id);
-      expect(updated?.status).toBe("failed");
-      expect(updated?.failureReason).toContain("no active session");
+      expect(updated?.status).not.toBe("failed");
+      expect(updated?.status).not.toBe("dead_letter");
+      expect(["unassigned", "in_progress"]).toContain(updated!.status);
     });
 
-    test("auto-fails stalled task with stale session heartbeat", async () => {
+    test("requeues stalled task with stale session heartbeat", async () => {
       const agent = createAgent({ name: "crashed-worker", isLead: false, status: "busy" });
       const task = createTaskExtended("Stalled task", { agentId: agent.id });
       startTask(task.id);
@@ -250,14 +254,16 @@ describe("Heartbeat Triage", () => {
 
       const findings = await codeLevelTriage();
 
-      expect(findings.autoFailedTasks.length).toBe(1);
-      expect(findings.autoFailedTasks[0]!.taskId).toBe(task.id);
+      expect(findings.reclaimedTasks.length).toBe(1);
+      expect(findings.reclaimedTasks[0]!.taskId).toBe(task.id);
+      expect(findings.reclaimedTasks[0]!.outcome).toBe("requeued");
       expect(findings.stalledTasks.length).toBe(0);
 
-      // Verify task is failed and session is deleted
+      // Task is requeued (not failed) and the dead session is cleaned up.
       const updated = getTaskById(task.id);
-      expect(updated?.status).toBe("failed");
-      expect(updated?.failureReason).toContain("stale");
+      expect(updated?.status).not.toBe("failed");
+      expect(updated?.status).not.toBe("dead_letter");
+      expect(["unassigned", "in_progress"]).toContain(updated!.status);
 
       const session = getActiveSessionForTask(task.id);
       expect(session).toBeNull();
@@ -404,7 +410,7 @@ describe("Heartbeat Triage", () => {
       expect(tasks.length).toBe(1);
     });
 
-    test("auto-fails stalled task with no session during sweep", async () => {
+    test("requeues stalled task with no session during sweep", async () => {
       const worker = createAgent({ name: "dead-worker", isLead: false, status: "busy" });
       const task = createTaskExtended("Stalled no-session", { agentId: worker.id });
       startTask(task.id);
@@ -414,8 +420,11 @@ describe("Heartbeat Triage", () => {
 
       await runHeartbeatSweep();
 
+      // Requeued rather than failed. The sweep's auto-assign step may hand it
+      // straight back out, which is the desired outcome: the work continues.
       const updated = getTaskById(task.id);
-      expect(updated?.status).toBe("failed");
+      expect(updated?.status).not.toBe("failed");
+      expect(["unassigned", "in_progress"]).toContain(updated!.status);
     });
 
     test("cleans stale sessions even when preflight gate bails", async () => {

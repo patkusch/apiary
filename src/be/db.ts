@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { parseProviderMeta } from "@/utils/provider-metadata.ts";
 import pkg from "../../package.json";
-import { addEyesReactionOnTaskStart } from "../github/task-reactions";
+import { emitTaskStarted } from "./task-hooks.ts";
 import { configureDbResolver } from "../prompts/resolver";
 import type {
   ActiveSession,
@@ -933,6 +933,10 @@ type AgentTaskRow = {
   tags: string | null;
   priority: number;
   dependsOn: string | null;
+  attempts: number;
+  maxAttempts: number;
+  leaseExpiresAt: string | null;
+  leaseOwnerId: string | null;
   offeredTo: string | null;
   offeredAt: string | null;
   acceptedAt: string | null;
@@ -996,6 +1000,10 @@ function rowToAgentTask(row: AgentTaskRow): AgentTask {
     tags: row.tags ? JSON.parse(row.tags) : [],
     priority: row.priority ?? 50,
     dependsOn: row.dependsOn ? JSON.parse(row.dependsOn) : [],
+    attempts: row.attempts ?? 0,
+    maxAttempts: row.maxAttempts ?? DEFAULT_MAX_TASK_ATTEMPTS,
+    leaseExpiresAt: row.leaseExpiresAt ?? undefined,
+    leaseOwnerId: row.leaseOwnerId ?? undefined,
     offeredTo: row.offeredTo ?? undefined,
     offeredAt: row.offeredAt ?? undefined,
     acceptedAt: row.acceptedAt ?? undefined,
@@ -1198,9 +1206,9 @@ export function startTask(taskId: string): AgentTask | null {
     } catch {}
   }
   const result = row ? rowToAgentTask(row) : null;
-  // Fire-and-forget: add eyes reaction for GitHub-sourced tasks
+  // Notify integrations out-of-band; the write path stays network-free.
   if (result && oldTask.status !== "in_progress") {
-    addEyesReactionOnTaskStart(result).catch(() => {});
+    emitTaskStarted(result);
   }
   return result;
 }
@@ -2406,18 +2414,218 @@ export function createTaskExtended(task: string, options?: CreateTaskOptions): A
   return rowToAgentTask(row);
 }
 
+// ============================================================================
+// Task leases — at-least-once execution with a bounded retry budget
+// ============================================================================
+
+/** Default retry budget before a repeatedly-crashing task is dead-lettered. */
+export const DEFAULT_MAX_TASK_ATTEMPTS = 3;
+
+/**
+ * How long a claim is valid without renewal. Must comfortably exceed the worker
+ * session heartbeat interval so a healthy-but-busy worker is never reaped.
+ */
+export const TASK_LEASE_DURATION_MS = Number(
+  process.env.TASK_LEASE_DURATION_MS ?? 10 * 60 * 1000,
+);
+
+function computeLeaseExpiry(fromMs: number = Date.now()): string {
+  return new Date(fromMs + TASK_LEASE_DURATION_MS).toISOString();
+}
+
+/**
+ * Extend the lease on a task. Called from the worker's heartbeat.
+ *
+ * Guarded on `leaseOwnerId` so a worker that was already reaped (and whose task
+ * has since been picked up by someone else) cannot resurrect its stale claim.
+ * Returns true if the lease was extended.
+ */
+export function renewTaskLease(taskId: string, agentId: string): boolean {
+  const now = new Date().toISOString();
+  const row = getDb()
+    .prepare<{ id: string }, [string, string, string, string]>(
+      `UPDATE agent_tasks SET leaseExpiresAt = ?, lastUpdatedAt = ?
+       WHERE id = ? AND leaseOwnerId = ? AND status = 'in_progress'
+       RETURNING id`,
+    )
+    .get(computeLeaseExpiry(), now, taskId, agentId);
+  return row !== null;
+}
+
+/** Drop the lease without changing task status (used on clean handoff). */
+export function clearTaskLease(taskId: string): void {
+  getDb()
+    .prepare("UPDATE agent_tasks SET leaseExpiresAt = NULL, leaseOwnerId = NULL WHERE id = ?")
+    .run(taskId);
+}
+
+export type ReclaimedTask = {
+  taskId: string;
+  previousOwnerId: string | null;
+  attempts: number;
+  maxAttempts: number;
+  outcome: "requeued" | "dead_lettered";
+};
+
+/**
+ * Reap tasks whose lease has expired.
+ *
+ * Upstream failed these tasks outright, which discarded in-flight work on any
+ * worker crash or deploy restart. Here an expired lease means "nobody is working
+ * on this any more", which is a scheduling fact, not a task failure:
+ *
+ *   attempts < maxAttempts  -> back to 'unassigned' for another worker
+ *   attempts >= maxAttempts -> 'dead_letter' for inspection
+ *
+ * Tasks are only dead-lettered once the retry budget is genuinely spent, so a
+ * poison task cannot spin forever, and a transient crash cannot lose work.
+ */
+export function reclaimExpiredTaskLeases(nowMs: number = Date.now()): ReclaimedTask[] {
+  const now = new Date(nowMs).toISOString();
+  const database = getDb();
+
+  const expired = database
+    .prepare<
+      { id: string; leaseOwnerId: string | null; attempts: number; maxAttempts: number },
+      [string]
+    >(
+      `SELECT id, leaseOwnerId, attempts, maxAttempts FROM agent_tasks
+       WHERE status = 'in_progress' AND leaseExpiresAt IS NOT NULL AND leaseExpiresAt < ?`,
+    )
+    .all(now);
+
+  if (expired.length === 0) return [];
+
+  const reclaimed: ReclaimedTask[] = [];
+
+  const txn = database.transaction(() => {
+    for (const task of expired) {
+      const budget = task.maxAttempts ?? DEFAULT_MAX_TASK_ATTEMPTS;
+      const exhausted = task.attempts >= budget;
+
+      if (exhausted) {
+        database
+          .prepare(
+            `UPDATE agent_tasks
+               SET status = 'dead_letter', agentId = NULL, leaseExpiresAt = NULL,
+                   leaseOwnerId = NULL, lastUpdatedAt = ?, finishedAt = ?,
+                   failureReason = ?
+             WHERE id = ? AND status = 'in_progress'`,
+          )
+          .run(
+            now,
+            now,
+            `Dead-lettered after ${task.attempts} attempt(s): worker lease expired each time`,
+            task.id,
+          );
+      } else {
+        database
+          .prepare(
+            `UPDATE agent_tasks
+               SET status = 'unassigned', agentId = NULL, leaseExpiresAt = NULL,
+                   leaseOwnerId = NULL, lastUpdatedAt = ?
+             WHERE id = ? AND status = 'in_progress'`,
+          )
+          .run(now, task.id);
+      }
+
+      reclaimed.push({
+        taskId: task.id,
+        previousOwnerId: task.leaseOwnerId,
+        attempts: task.attempts,
+        maxAttempts: budget,
+        outcome: exhausted ? "dead_lettered" : "requeued",
+      });
+    }
+  });
+  txn();
+
+  for (const entry of reclaimed) {
+    try {
+      createLogEntry({
+        eventType: entry.outcome === "requeued" ? "task_released" : "task_status_change",
+        agentId: entry.previousOwnerId ?? undefined,
+        taskId: entry.taskId,
+        oldValue: "in_progress",
+        newValue: entry.outcome === "requeued" ? "unassigned" : "dead_letter",
+      });
+    } catch {}
+  }
+
+  return reclaimed;
+}
+
+/**
+ * Force-reclaim a single task whose worker is known to be gone (heartbeat has
+ * already proven the session is dead), without waiting for the lease clock.
+ *
+ * Expires the lease and runs the normal reaper so requeue vs dead-letter uses
+ * exactly one code path. Also covers tasks claimed before the lease migration,
+ * which carry a NULL lease.
+ */
+export function reclaimTaskLease(taskId: string): ReclaimedTask | null {
+  const past = new Date(0).toISOString();
+  const forced = getDb()
+    .prepare<{ id: string }, [string, string]>(
+      `UPDATE agent_tasks SET leaseExpiresAt = ?
+       WHERE id = ? AND status = 'in_progress' RETURNING id`,
+    )
+    .get(past, taskId);
+  if (!forced) return null;
+
+  return reclaimExpiredTaskLeases().find((r) => r.taskId === taskId) ?? null;
+}
+
+/** Tasks parked after exhausting their retry budget. */
+export function getDeadLetterTasks(limit = 100): AgentTask[] {
+  const rows = getDb()
+    .prepare<AgentTaskRow, [number]>(
+      "SELECT * FROM agent_tasks WHERE status = 'dead_letter' ORDER BY lastUpdatedAt DESC LIMIT ?",
+    )
+    .all(limit);
+  return rows.map(rowToAgentTask);
+}
+
+/** Return a dead-lettered task to the pool with a fresh retry budget. */
+export function requeueDeadLetterTask(
+  taskId: string,
+  extraAttempts = DEFAULT_MAX_TASK_ATTEMPTS,
+): AgentTask | null {
+  const now = new Date().toISOString();
+  const row = getDb()
+    .prepare<AgentTaskRow, [string, number, string]>(
+      `UPDATE agent_tasks
+         SET status = 'unassigned', agentId = NULL, finishedAt = NULL,
+             failureReason = NULL, lastUpdatedAt = ?, maxAttempts = attempts + ?
+       WHERE id = ? AND status = 'dead_letter' RETURNING *`,
+    )
+    .get(now, extraAttempts, taskId);
+  return row ? rowToAgentTask(row) : null;
+}
+
 export function claimTask(taskId: string, agentId: string): AgentTask | null {
   // Atomic claim: single UPDATE with WHERE guard ensures exactly-once claiming.
   // No pre-read needed — the WHERE clause handles the race condition.
   // Status goes directly to 'in_progress' because the claiming session is
   // already working on the task (prevents duplicate task_assigned triggers).
+  //
+  // The claim also takes a lease. The owning worker must call renewTaskLease()
+  // (driven by its session heartbeat) to keep it; if the worker dies the lease
+  // lapses and reclaimExpiredTaskLeases() requeues the task instead of failing it.
   const now = new Date().toISOString();
+  const leaseExpiresAt = computeLeaseExpiry();
   const row = getDb()
-    .prepare<AgentTaskRow, [string, string, string]>(
-      `UPDATE agent_tasks SET agentId = ?, status = 'in_progress', lastUpdatedAt = ?
+    .prepare<AgentTaskRow, [string, string, string, string, string]>(
+      `UPDATE agent_tasks
+         SET agentId = ?,
+             status = 'in_progress',
+             lastUpdatedAt = ?,
+             attempts = attempts + 1,
+             leaseExpiresAt = ?,
+             leaseOwnerId = ?
        WHERE id = ? AND status = 'unassigned' RETURNING *`,
     )
-    .get(agentId, now, taskId);
+    .get(agentId, now, leaseExpiresAt, agentId, taskId);
 
   if (row) {
     try {
@@ -2432,9 +2640,8 @@ export function claimTask(taskId: string, agentId: string): AgentTask | null {
   }
 
   const result = row ? rowToAgentTask(row) : null;
-  // Fire-and-forget: add eyes reaction for GitHub-sourced tasks
   if (result) {
-    addEyesReactionOnTaskStart(result).catch(() => {});
+    emitTaskStarted(result);
   }
   return result;
 }
@@ -5437,6 +5644,19 @@ export function heartbeatActiveSession(taskId: string): boolean {
   const result = getDb()
     .prepare("UPDATE active_sessions SET lastHeartbeatAt = ? WHERE taskId = ?")
     .run(now, taskId);
+
+  // A live session is also proof the lease holder is alive, so renew the task
+  // lease on the same tick. Guarded on leaseOwnerId inside renewTaskLease, so a
+  // session that was already reaped cannot steal back a reassigned task.
+  const owner = getDb()
+    .prepare<{ leaseOwnerId: string | null }, [string]>(
+      "SELECT leaseOwnerId FROM agent_tasks WHERE id = ?",
+    )
+    .get(taskId);
+  if (owner?.leaseOwnerId) {
+    renewTaskLease(taskId, owner.leaseOwnerId);
+  }
+
   return result.changes > 0;
 }
 

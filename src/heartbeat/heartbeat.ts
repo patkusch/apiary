@@ -4,6 +4,8 @@ import {
   createTaskExtended,
   deleteActiveSession,
   failTask,
+  reclaimExpiredTaskLeases,
+  reclaimTaskLease,
   getActiveSessionForTask,
   getActiveTaskCount,
   getAllAgents,
@@ -65,6 +67,14 @@ const HEARTBEAT_CHECKLIST_DISABLE = Boolean(process.env.HEARTBEAT_CHECKLIST_DISA
 export interface HeartbeatFindings {
   stalledTasks: AgentTask[];
   autoFailedTasks: Array<{ taskId: string; agentId: string; reason: string }>;
+  /** Tasks whose worker died and which were requeued or dead-lettered. */
+  reclaimedTasks: Array<{
+    taskId: string;
+    agentId: string | null;
+    attempts: number;
+    maxAttempts: number;
+    outcome: "requeued" | "dead_lettered";
+  }>;
   workerHealthFixes: Array<{ agentId: string; oldStatus: string; newStatus: string }>;
   autoAssigned: Array<{ taskId: string; agentId: string }>;
   staleCleanup: {
@@ -128,6 +138,7 @@ export async function codeLevelTriage(): Promise<HeartbeatFindings> {
   const findings: HeartbeatFindings = {
     stalledTasks: [],
     autoFailedTasks: [],
+    reclaimedTasks: [],
     workerHealthFixes: [],
     autoAssigned: [],
     staleCleanup: {
@@ -148,19 +159,65 @@ export async function codeLevelTriage(): Promise<HeartbeatFindings> {
   // 3. Auto-assign pool tasks to idle workers
   autoAssignPoolTasks(findings);
 
-  // 4. Cleanup stale resources (including workflow run recovery)
+  // 4. Reclaim any lease that lapsed without the stall detector noticing
+  //    (e.g. the API restarted while a worker was mid-task).
+  for (const reclaimed of reclaimExpiredTaskLeases()) {
+    findings.reclaimedTasks.push({
+      taskId: reclaimed.taskId,
+      agentId: reclaimed.previousOwnerId,
+      attempts: reclaimed.attempts,
+      maxAttempts: reclaimed.maxAttempts,
+      outcome: reclaimed.outcome,
+    });
+  }
+
+  // 5. Cleanup stale resources (including workflow run recovery)
   await cleanupStaleResources(findings);
 
   return findings;
 }
 
 /**
+ * A worker holding this task is gone. Requeue the task (or dead-letter it once
+ * its retry budget is spent) and settle the ex-owner's agent status.
+ */
+function reclaimStalledTask(
+  task: { id: string; agentId: string | null },
+  findings: HeartbeatFindings,
+  cause: string,
+): void {
+  const result = reclaimTaskLease(task.id);
+  if (!result) return;
+
+  findings.reclaimedTasks.push({
+    taskId: task.id,
+    agentId: task.agentId,
+    attempts: result.attempts,
+    maxAttempts: result.maxAttempts,
+    outcome: result.outcome,
+  });
+
+  console.log(
+    `[Heartbeat] ${result.outcome === "requeued" ? "Requeued" : "Dead-lettered"} task ` +
+      `${task.id.slice(0, 8)} (attempt ${result.attempts}/${result.maxAttempts}) — ${cause}`,
+  );
+
+  if (task.agentId && getActiveTaskCount(task.agentId) === 0) {
+    updateAgentStatus(task.agentId, "idle");
+  }
+}
+
+/**
  * Tiered stall detection and auto-remediation.
  *
  * Cross-checks stalled tasks with active_sessions to determine severity:
- * - No active session → worker is dead → auto-fail (5 min threshold)
- * - Stale session heartbeat → worker likely crashed → auto-fail (15 min threshold)
+ * - No active session → worker is dead → reclaim the lease (5 min threshold)
+ * - Stale session heartbeat → worker likely crashed → reclaim the lease (15 min threshold)
  * - Fresh session heartbeat → worker alive but task stale → escalate to lead (30 min threshold)
+ *
+ * A dead worker is a scheduling event, not a task failure. Both crash cases
+ * requeue the task for another worker and only dead-letter it once its retry
+ * budget is spent — previously they called failTask() and the work was lost.
  */
 function detectAndRemediateStalledTasks(findings: HeartbeatFindings): void {
   // Use the shortest threshold to catch all potentially stalled tasks
@@ -175,19 +232,7 @@ function detectAndRemediateStalledTasks(findings: HeartbeatFindings): void {
     if (!session) {
       // Case A: No active session — worker is dead
       if (taskAgeMs >= STALL_THRESHOLD_NO_SESSION_MIN * 60 * 1000) {
-        const reason =
-          "Auto-failed by heartbeat: worker session not found (no active session for task)";
-        const failed = failTask(task.id, reason);
-        if (failed) {
-          findings.autoFailedTasks.push({ taskId: task.id, agentId: task.agentId, reason });
-          console.log(`[Heartbeat] Auto-failed task ${task.id.slice(0, 8)} — no active session`);
-
-          // Fix agent status if no other active tasks
-          const remaining = getActiveTaskCount(task.agentId);
-          if (remaining === 0) {
-            updateAgentStatus(task.agentId, "idle");
-          }
-        }
+        reclaimStalledTask(task, findings, "worker session not found");
       }
     } else {
       const sessionHeartbeatAgeMs = Date.now() - new Date(session.lastHeartbeatAt).getTime();
@@ -197,21 +242,8 @@ function detectAndRemediateStalledTasks(findings: HeartbeatFindings): void {
       if (isStaleHeartbeat) {
         // Case B: Session exists but heartbeat is stale — worker likely crashed
         if (taskAgeMs >= STALL_THRESHOLD_STALE_HEARTBEAT_MIN * 60 * 1000) {
-          const reason =
-            "Auto-failed by heartbeat: worker session heartbeat is stale (likely crashed)";
-          const failed = failTask(task.id, reason);
-          if (failed) {
-            findings.autoFailedTasks.push({ taskId: task.id, agentId: task.agentId, reason });
-            deleteActiveSession(task.id);
-            console.log(
-              `[Heartbeat] Auto-failed task ${task.id.slice(0, 8)} — stale session heartbeat`,
-            );
-
-            const remaining = getActiveTaskCount(task.agentId);
-            if (remaining === 0) {
-              updateAgentStatus(task.agentId, "idle");
-            }
-          }
+          deleteActiveSession(task.id);
+          reclaimStalledTask(task, findings, "worker session heartbeat is stale");
         }
       } else {
         // Case C: Session exists and heartbeat is fresh — ambiguous
@@ -674,6 +706,7 @@ export async function runHeartbeatSweep(): Promise<void> {
       const cleanupOnlyFindings: HeartbeatFindings = {
         stalledTasks: [],
         autoFailedTasks: [],
+        reclaimedTasks: [],
         workerHealthFixes: [],
         autoAssigned: [],
         staleCleanup: {
@@ -705,6 +738,12 @@ export async function runHeartbeatSweep(): Promise<void> {
 function logFindings(findings: HeartbeatFindings): void {
   const parts: string[] = [];
 
+  if (findings.reclaimedTasks.length > 0) {
+    const requeued = findings.reclaimedTasks.filter((t) => t.outcome === "requeued").length;
+    const dead = findings.reclaimedTasks.length - requeued;
+    if (requeued > 0) parts.push(`requeued=${requeued}`);
+    if (dead > 0) parts.push(`dead_lettered=${dead}`);
+  }
   if (findings.autoFailedTasks.length > 0) {
     parts.push(`auto_failed=${findings.autoFailedTasks.length}`);
   }
