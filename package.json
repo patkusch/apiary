@@ -1,23 +1,17 @@
 {
-  "name": "@desplega.ai/agent-swarm",
-  "version": "1.76.3",
-  "description": "Multi-agent orchestration for Claude Code, Codex, Gemini CLI, and other AI coding assistants",
+  "name": "apiary",
+  "version": "0.1.0",
+  "description": "Durable multi-agent orchestration for coding agents — leased tasks, measured memory, no lost work",
   "license": "MIT",
-  "author": "desplega.sh <contact@desplega.sh>",
-  "maintainers": [
-    {
-      "name": "Taras",
-      "email": "t@desplega.sh"
-    }
-  ],
+  "author": "patkusch",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/desplega-ai/agent-swarm.git"
+    "url": "git+https://github.com/patkusch/apiary.git"
   },
   "bugs": {
-    "url": "https://github.com/desplega-ai/agent-swarm/issues"
+    "url": "https://github.com/patkusch/apiary/issues"
   },
-  "homepage": "https://github.com/desplega-ai/agent-swarm#readme",
+  "homepage": "https://github.com/patkusch/apiary#readme",
   "publishConfig": {
     "access": "public"
   },
@@ -34,11 +28,10 @@
   "module": "src/http.ts",
   "type": "module",
   "bin": {
-    "agent-swarm": "./src/cli.tsx"
+    "apiary": "./src/cli.tsx"
   },
-  "@desplega.ai/agent-swarm": "link:@desplega.ai/agent-swarm",
   "config": {
-    "name": "agent-swarm"
+    "name": "apiary"
   },
   "scripts": {
     "build:pi-skills": "bun run plugin/build-pi-skills.ts",

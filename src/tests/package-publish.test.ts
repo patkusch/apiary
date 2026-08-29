@@ -42,6 +42,6 @@ describe("published package", () => {
       stdio: "pipe",
     });
 
-    expect(output).toContain("agent-swarm v");
+    expect(output).toContain("apiary v");
   });
 });
