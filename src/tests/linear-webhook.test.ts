@@ -1,0 +1,890 @@
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { createHmac } from "node:crypto";
+import { unlink } from "node:fs/promises";
+import { closeDb, createTaskExtended, getTaskById, initDb } from "../be/db";
+import { createTrackerSync, getTrackerSyncByExternalId } from "../be/db-queries/tracker";
+import {
+  buildSkipMessage,
+  DEFAULT_ALLOWED_STATE_TYPES,
+  DEFAULT_SWARM_READY_LABEL,
+  getLinearGateConfig,
+  SWARM_READY_LABEL,
+  shouldCreateTaskFromLinearEvent,
+} from "../linear/gate";
+import {
+  handleAgentSessionEvent,
+  handleIssueDelete,
+  handleIssueUpdate,
+  mapLinearStatusToSwarm,
+} from "../linear/sync";
+import {
+  _clearRecentDeliveries,
+  handleLinearWebhook,
+  verifyLinearWebhook,
+} from "../linear/webhook";
+import { getTemplateDefinition } from "../prompts/registry";
+
+const TEST_DB_PATH = "./test-linear-webhook.sqlite";
+const TEST_SECRET = "test-webhook-secret-123";
+
+function signPayload(payload: string, secret: string): string {
+  return createHmac("sha256", secret).update(payload).digest("hex");
+}
+
+beforeAll(() => {
+  initDb(TEST_DB_PATH);
+  process.env.LINEAR_SIGNING_SECRET = TEST_SECRET;
+});
+
+afterAll(async () => {
+  delete process.env.LINEAR_SIGNING_SECRET;
+  closeDb();
+  await unlink(TEST_DB_PATH).catch(() => {});
+  await unlink(`${TEST_DB_PATH}-wal`).catch(() => {});
+  await unlink(`${TEST_DB_PATH}-shm`).catch(() => {});
+});
+
+beforeEach(async () => {
+  _clearRecentDeliveries();
+  // Re-register Linear templates if cleared by parallel test files
+  if (!getTemplateDefinition("linear.issue.assigned")) {
+    await import(`../linear/templates?t=${Date.now()}`);
+  }
+});
+
+// ─── verifyLinearWebhook ─────────────────────────────────────────────────────
+
+describe("verifyLinearWebhook", () => {
+  test("returns true for valid signature", () => {
+    const body = '{"type":"Issue","action":"update"}';
+    const sig = signPayload(body, TEST_SECRET);
+    expect(verifyLinearWebhook(body, sig, TEST_SECRET)).toBe(true);
+  });
+
+  test("returns false for invalid signature", () => {
+    const body = '{"type":"Issue","action":"update"}';
+    const sig = "deadbeef0000000000000000000000000000000000000000000000000000abcd";
+    expect(verifyLinearWebhook(body, sig, TEST_SECRET)).toBe(false);
+  });
+
+  test("returns false for tampered body", () => {
+    const body = '{"type":"Issue","action":"update"}';
+    const sig = signPayload(body, TEST_SECRET);
+    expect(verifyLinearWebhook(`${body}x`, sig, TEST_SECRET)).toBe(false);
+  });
+
+  test("returns false for mismatched length signature", () => {
+    const body = '{"type":"Issue","action":"update"}';
+    expect(verifyLinearWebhook(body, "short", TEST_SECRET)).toBe(false);
+  });
+});
+
+// ─── handleLinearWebhook ─────────────────────────────────────────────────────
+
+describe("handleLinearWebhook", () => {
+  test("returns 503 when LINEAR_SIGNING_SECRET is not set", async () => {
+    const saved = process.env.LINEAR_SIGNING_SECRET;
+    delete process.env.LINEAR_SIGNING_SECRET;
+
+    const result = await handleLinearWebhook("{}", {});
+    expect(result.status).toBe(503);
+
+    process.env.LINEAR_SIGNING_SECRET = saved;
+  });
+
+  test("returns 401 with missing signature", async () => {
+    const body = '{"type":"Issue","action":"update"}';
+    const result = await handleLinearWebhook(body, {});
+    expect(result.status).toBe(401);
+  });
+
+  test("returns 401 with invalid signature", async () => {
+    const body = '{"type":"Issue","action":"update"}';
+    const result = await handleLinearWebhook(body, {
+      "linear-signature": "bad-signature-value-that-is-long-enough-for-hmac-compare-64ch",
+    });
+    expect(result.status).toBe(401);
+  });
+
+  test("returns 200 with valid signature", async () => {
+    const body = '{"type":"Issue","action":"update","data":{}}';
+    const sig = signPayload(body, TEST_SECRET);
+
+    const result = await handleLinearWebhook(body, { "linear-signature": sig });
+    expect(result.status).toBe(200);
+    expect(result.body).toEqual({ status: "accepted" });
+  });
+
+  test("accepts x-linear-signature header as alternative", async () => {
+    const body = '{"type":"Issue","action":"update","data":{}}';
+    const sig = signPayload(body, TEST_SECRET);
+
+    const result = await handleLinearWebhook(body, { "x-linear-signature": sig });
+    expect(result.status).toBe(200);
+    expect(result.body).toEqual({ status: "accepted" });
+  });
+
+  test("deduplicates by linear-delivery header", async () => {
+    const body = '{"type":"Issue","action":"update","data":{}}';
+    const sig = signPayload(body, TEST_SECRET);
+    const deliveryId = "dedup-test-delivery-001";
+
+    const first = await handleLinearWebhook(body, {
+      "linear-signature": sig,
+      "linear-delivery": deliveryId,
+    });
+    expect(first.status).toBe(200);
+    expect(first.body).toEqual({ status: "accepted" });
+
+    const second = await handleLinearWebhook(body, {
+      "linear-signature": sig,
+      "linear-delivery": deliveryId,
+    });
+    expect(second.status).toBe(200);
+    expect(second.body).toEqual({ status: "duplicate" });
+  });
+
+  test("allows different delivery IDs through", async () => {
+    const body = '{"type":"Issue","action":"update","data":{}}';
+    const sig = signPayload(body, TEST_SECRET);
+
+    const first = await handleLinearWebhook(body, {
+      "linear-signature": sig,
+      "linear-delivery": "delivery-a",
+    });
+    expect(first.body).toEqual({ status: "accepted" });
+
+    const second = await handleLinearWebhook(body, {
+      "linear-signature": sig,
+      "linear-delivery": "delivery-b",
+    });
+    expect(second.body).toEqual({ status: "accepted" });
+  });
+});
+
+// ─── mapLinearStatusToSwarm ──────────────────────────────────────────────────
+
+describe("mapLinearStatusToSwarm", () => {
+  test("maps known statuses", () => {
+    expect(mapLinearStatusToSwarm("Backlog")).toBe("skip");
+    expect(mapLinearStatusToSwarm("Todo")).toBe("unassigned");
+    expect(mapLinearStatusToSwarm("In Progress")).toBe("in_progress");
+    expect(mapLinearStatusToSwarm("Done")).toBe("completed");
+    expect(mapLinearStatusToSwarm("Canceled")).toBe("cancelled");
+    expect(mapLinearStatusToSwarm("Cancelled")).toBe("cancelled");
+  });
+
+  test("returns null for unknown status", () => {
+    expect(mapLinearStatusToSwarm("Triage")).toBeNull();
+    expect(mapLinearStatusToSwarm("Custom Status")).toBeNull();
+  });
+});
+
+// ─── handleAgentSessionEvent (sync) ──────────────────────────────────────────
+
+describe("handleAgentSessionEvent", () => {
+  test("creates a task and tracker_sync for new issue", async () => {
+    const event = {
+      type: "AgentSession",
+      action: "create",
+      data: {
+        issue: {
+          id: "issue-agent-session-001",
+          identifier: "ENG-100",
+          title: "Fix login bug",
+          url: "https://linear.app/team/issue/ENG-100",
+          description: "Users cannot log in with SSO",
+        },
+      },
+    };
+
+    await handleAgentSessionEvent(event);
+
+    const sync = getTrackerSyncByExternalId("linear", "task", "issue-agent-session-001");
+    expect(sync).not.toBeNull();
+    expect(sync!.externalIdentifier).toBe("ENG-100");
+    expect(sync!.externalUrl).toBe("https://linear.app/team/issue/ENG-100");
+    expect(sync!.lastSyncOrigin).toBe("external");
+    expect(sync!.syncDirection).toBe("inbound");
+
+    const task = getTaskById(sync!.swarmId);
+    expect(task).not.toBeNull();
+    expect(task!.source).toBe("linear");
+    expect(task!.taskType).toBe("linear-issue");
+    expect(task!.task).toContain("[Linear ENG-100]");
+    expect(task!.task).toContain("Fix login bug");
+  });
+
+  test("skips when already-tracked issue has an active task", async () => {
+    const event = {
+      type: "AgentSession",
+      action: "create",
+      data: {
+        issue: {
+          id: "issue-agent-session-001",
+          identifier: "ENG-100",
+          title: "Fix login bug",
+          url: "https://linear.app/team/issue/ENG-100",
+        },
+      },
+    };
+
+    // The task from the previous test is still pending (active)
+    const syncBefore = getTrackerSyncByExternalId("linear", "task", "issue-agent-session-001");
+    expect(syncBefore).not.toBeNull();
+    const originalSwarmId = syncBefore!.swarmId;
+
+    await handleAgentSessionEvent(event);
+
+    // Sync should still point to the same task (no follow-up created)
+    const syncAfter = getTrackerSyncByExternalId("linear", "task", "issue-agent-session-001");
+    expect(syncAfter).not.toBeNull();
+    expect(syncAfter!.swarmId).toBe(originalSwarmId);
+  });
+
+  test("creates follow-up task when already-tracked issue has a completed task", async () => {
+    // Create a task and tracker_sync, then mark the task as completed
+    const originalTask = createTaskExtended("Original linear task", {
+      source: "linear",
+      taskType: "linear-issue",
+    });
+    const { getDb } = await import("../be/db");
+    getDb().query("UPDATE agent_tasks SET status = 'completed' WHERE id = ?").run(originalTask.id);
+
+    createTrackerSync({
+      provider: "linear",
+      entityType: "task",
+      providerEntityType: "Issue",
+      swarmId: originalTask.id,
+      externalId: "issue-followup-completed-001",
+      externalIdentifier: "ENG-150",
+      externalUrl: "https://linear.app/team/issue/ENG-150",
+      lastSyncOrigin: "external",
+      syncDirection: "inbound",
+    });
+
+    const event = {
+      type: "AgentSession",
+      action: "create",
+      data: {
+        issue: {
+          id: "issue-followup-completed-001",
+          identifier: "ENG-150",
+          title: "Fix login bug again",
+          url: "https://linear.app/team/issue/ENG-150",
+          description: "Still broken",
+        },
+      },
+    };
+
+    await handleAgentSessionEvent(event);
+
+    // tracker_sync should now point to a NEW task
+    const sync = getTrackerSyncByExternalId("linear", "task", "issue-followup-completed-001");
+    expect(sync).not.toBeNull();
+    expect(sync!.swarmId).not.toBe(originalTask.id);
+
+    // New task should exist and use the reassigned template
+    const followupTask = getTaskById(sync!.swarmId);
+    expect(followupTask).not.toBeNull();
+    expect(followupTask!.source).toBe("linear");
+    expect(followupTask!.taskType).toBe("linear-issue");
+    expect(followupTask!.task).toContain("[Linear ENG-150]");
+    expect(followupTask!.task).toContain("Re-assigned");
+  });
+
+  test("creates follow-up task when already-tracked issue has a failed task", async () => {
+    const originalTask = createTaskExtended("Failed linear task", {
+      source: "linear",
+      taskType: "linear-issue",
+    });
+    const { getDb } = await import("../be/db");
+    getDb().query("UPDATE agent_tasks SET status = 'failed' WHERE id = ?").run(originalTask.id);
+
+    createTrackerSync({
+      provider: "linear",
+      entityType: "task",
+      providerEntityType: "Issue",
+      swarmId: originalTask.id,
+      externalId: "issue-followup-failed-001",
+      externalIdentifier: "ENG-151",
+      externalUrl: "https://linear.app/team/issue/ENG-151",
+      lastSyncOrigin: "external",
+      syncDirection: "inbound",
+    });
+
+    const event = {
+      type: "AgentSession",
+      action: "create",
+      data: {
+        issue: {
+          id: "issue-followup-failed-001",
+          identifier: "ENG-151",
+          title: "Deploy pipeline fix",
+          url: "https://linear.app/team/issue/ENG-151",
+        },
+      },
+    };
+
+    await handleAgentSessionEvent(event);
+
+    const sync = getTrackerSyncByExternalId("linear", "task", "issue-followup-failed-001");
+    expect(sync).not.toBeNull();
+    expect(sync!.swarmId).not.toBe(originalTask.id);
+
+    const followupTask = getTaskById(sync!.swarmId);
+    expect(followupTask).not.toBeNull();
+    expect(followupTask!.source).toBe("linear");
+  });
+
+  test("skips event with no issue data", async () => {
+    await handleAgentSessionEvent({ type: "AgentSession", data: {} });
+    await handleAgentSessionEvent({ type: "AgentSession" });
+  });
+});
+
+// ─── handleIssueUpdate (sync) ────────────────────────────────────────────────
+
+describe("handleIssueUpdate", () => {
+  test("updates tracker_sync metadata on tracked issue status change", async () => {
+    // Create a task + tracker_sync first
+    const task = createTaskExtended("Test issue update task", { source: "linear" });
+    createTrackerSync({
+      provider: "linear",
+      entityType: "task",
+      swarmId: task.id,
+      externalId: "issue-update-001",
+      externalIdentifier: "ENG-200",
+      syncDirection: "inbound",
+    });
+
+    const event = {
+      type: "Issue",
+      action: "update",
+      data: {
+        id: "issue-update-001",
+        identifier: "ENG-200",
+        state: { name: "In Progress" },
+      },
+      updatedFrom: { stateId: "old-state-id" },
+    };
+
+    await handleIssueUpdate(event, "delivery-update-001");
+
+    const sync = getTrackerSyncByExternalId("linear", "task", "issue-update-001");
+    expect(sync).not.toBeNull();
+    expect(sync!.lastSyncOrigin).toBe("external");
+    expect(sync!.lastDeliveryId).toBe("delivery-update-001");
+  });
+
+  test("cancels task when Linear issue is cancelled", async () => {
+    const task = createTaskExtended("Test cancel task", { source: "linear" });
+    createTrackerSync({
+      provider: "linear",
+      entityType: "task",
+      swarmId: task.id,
+      externalId: "issue-cancel-001",
+      externalIdentifier: "ENG-201",
+      syncDirection: "inbound",
+    });
+
+    const event = {
+      type: "Issue",
+      action: "update",
+      data: {
+        id: "issue-cancel-001",
+        identifier: "ENG-201",
+        state: { name: "Canceled" },
+      },
+      updatedFrom: { stateId: "old-state-id" },
+    };
+
+    await handleIssueUpdate(event);
+
+    const updated = getTaskById(task.id);
+    expect(updated).not.toBeNull();
+    expect(updated!.status).toBe("cancelled");
+  });
+
+  test("ignores untracked issue updates", async () => {
+    const event = {
+      type: "Issue",
+      action: "update",
+      data: {
+        id: "untracked-issue-999",
+        state: { name: "In Progress" },
+      },
+      updatedFrom: { stateId: "old-state-id" },
+    };
+
+    // Should not throw
+    await handleIssueUpdate(event);
+  });
+
+  test("ignores update without updatedFrom field", async () => {
+    const task = createTaskExtended("Test no-updatedFrom task", { source: "linear" });
+    createTrackerSync({
+      provider: "linear",
+      entityType: "task",
+      swarmId: task.id,
+      externalId: "issue-no-update-from-001",
+      externalIdentifier: "ENG-300",
+      syncDirection: "inbound",
+    });
+
+    const event = {
+      type: "Issue",
+      action: "update",
+      data: {
+        id: "issue-no-update-from-001",
+        state: { name: "In Progress" },
+      },
+      // no updatedFrom
+    };
+
+    await handleIssueUpdate(event);
+    // Should not throw — just silently returns
+  });
+});
+
+// ─── handleIssueDelete (sync) ────────────────────────────────────────────────
+
+describe("handleIssueDelete", () => {
+  test("cancels task when tracked issue is deleted", async () => {
+    const task = createTaskExtended("Test delete task", { source: "linear" });
+    createTrackerSync({
+      provider: "linear",
+      entityType: "task",
+      swarmId: task.id,
+      externalId: "issue-delete-001",
+      externalIdentifier: "ENG-400",
+      syncDirection: "inbound",
+    });
+
+    const event = {
+      type: "Issue",
+      action: "remove",
+      data: { id: "issue-delete-001" },
+    };
+
+    await handleIssueDelete(event);
+
+    const updated = getTaskById(task.id);
+    expect(updated).not.toBeNull();
+    expect(updated!.status).toBe("cancelled");
+  });
+
+  test("ignores untracked issue delete", async () => {
+    const event = {
+      type: "Issue",
+      action: "remove",
+      data: { id: "untracked-delete-999" },
+    };
+
+    // Should not throw
+    await handleIssueDelete(event);
+  });
+
+  test("ignores delete for already-completed task", async () => {
+    const task = createTaskExtended("Test completed delete task", {
+      source: "linear",
+    });
+    // Manually complete the task to test guard
+    const { getDb } = await import("../be/db");
+    getDb().query("UPDATE agent_tasks SET status = 'completed' WHERE id = ?").run(task.id);
+
+    createTrackerSync({
+      provider: "linear",
+      entityType: "task",
+      swarmId: task.id,
+      externalId: "issue-delete-completed-001",
+      externalIdentifier: "ENG-401",
+      syncDirection: "inbound",
+    });
+
+    await handleIssueDelete({
+      type: "Issue",
+      action: "remove",
+      data: { id: "issue-delete-completed-001" },
+    });
+
+    // Should still be completed, not cancelled
+    const updated = getTaskById(task.id);
+    expect(updated!.status).toBe("completed");
+  });
+});
+
+// ─── shouldCreateTaskFromLinearEvent (gate) ──────────────────────────────────
+
+describe("shouldCreateTaskFromLinearEvent (default config)", () => {
+  test("creates task for unstarted (Todo) state", () => {
+    const decision = shouldCreateTaskFromLinearEvent({
+      stateType: "unstarted",
+      labelNames: [],
+    });
+    expect(decision).toEqual({ create: true, reason: "ready" });
+  });
+
+  test("creates task for started (In Progress) state", () => {
+    const decision = shouldCreateTaskFromLinearEvent({
+      stateType: "started",
+      labelNames: ["bug"],
+    });
+    expect(decision.create).toBe(true);
+  });
+
+  test("skips task for backlog state", () => {
+    const decision = shouldCreateTaskFromLinearEvent({
+      stateType: "backlog",
+      labelNames: [],
+    });
+    expect(decision).toEqual({ create: false, reason: "backlog" });
+  });
+
+  test("skips task for triage state", () => {
+    const decision = shouldCreateTaskFromLinearEvent({
+      stateType: "triage",
+      labelNames: ["needs-review"],
+    });
+    expect(decision).toEqual({ create: false, reason: "triage" });
+  });
+
+  test("swarm-ready label overrides backlog gate", () => {
+    const decision = shouldCreateTaskFromLinearEvent({
+      stateType: "backlog",
+      labelNames: [SWARM_READY_LABEL],
+    });
+    expect(decision).toEqual({ create: true, reason: "label-override" });
+  });
+
+  test("swarm-ready label overrides triage gate", () => {
+    const decision = shouldCreateTaskFromLinearEvent({
+      stateType: "triage",
+      labelNames: ["bug", SWARM_READY_LABEL, "p0"],
+    });
+    expect(decision).toEqual({ create: true, reason: "label-override" });
+  });
+
+  test("label match is case-insensitive", () => {
+    const decision = shouldCreateTaskFromLinearEvent({
+      stateType: "backlog",
+      labelNames: ["Swarm-Ready"],
+    });
+    expect(decision.create).toBe(true);
+  });
+
+  test("state matching is case-insensitive (defensive)", () => {
+    // Linear's enum is lowercase but be defensive in case payload casing varies.
+    const decision = shouldCreateTaskFromLinearEvent({
+      stateType: "Backlog",
+      labelNames: [],
+    });
+    expect(decision).toEqual({ create: false, reason: "backlog" });
+  });
+
+  test("allowed state types pass through", () => {
+    // E.g. completed, canceled — included in default allowlist, trigger as today.
+    expect(shouldCreateTaskFromLinearEvent({ stateType: "completed", labelNames: [] }).create).toBe(
+      true,
+    );
+    expect(shouldCreateTaskFromLinearEvent({ stateType: "canceled", labelNames: [] }).create).toBe(
+      true,
+    );
+  });
+
+  test("null state type allows task creation (fail-open)", () => {
+    // If we couldn't resolve the state for any reason, default to today's
+    // behavior rather than silently swallowing assignments.
+    const decision = shouldCreateTaskFromLinearEvent({
+      stateType: null,
+      labelNames: [],
+    });
+    expect(decision.create).toBe(true);
+  });
+
+  test("DEFAULT_SWARM_READY_LABEL matches today's hardcoded value", () => {
+    expect(DEFAULT_SWARM_READY_LABEL).toBe("swarm-ready");
+    expect(SWARM_READY_LABEL).toBe(DEFAULT_SWARM_READY_LABEL);
+  });
+
+  test("DEFAULT_ALLOWED_STATE_TYPES covers Linear enum minus triage/backlog", () => {
+    expect([...DEFAULT_ALLOWED_STATE_TYPES].sort()).toEqual(
+      ["canceled", "completed", "started", "unstarted"].sort(),
+    );
+  });
+});
+
+describe("shouldCreateTaskFromLinearEvent (env-driven overrides)", () => {
+  const envKeys = ["LINEAR_ALLOWED_STATES", "LINEAR_SWARM_READY_LABEL"] as const;
+  const saved: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    for (const k of envKeys) {
+      saved[k] = process.env[k];
+      delete process.env[k];
+    }
+  });
+
+  // Re-snapshot only this scope's env state on cleanup.
+  function restore() {
+    for (const k of envKeys) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  }
+
+  test("LINEAR_ALLOWED_STATES expands the allowlist (e.g. include backlog)", () => {
+    process.env.LINEAR_ALLOWED_STATES = "unstarted,started,backlog";
+    const decision = shouldCreateTaskFromLinearEvent({
+      stateType: "backlog",
+      labelNames: [],
+    });
+    expect(decision).toEqual({ create: true, reason: "ready" });
+    restore();
+  });
+
+  test("LINEAR_ALLOWED_STATES restricts the allowlist (drop completed)", () => {
+    process.env.LINEAR_ALLOWED_STATES = "unstarted,started";
+    const decision = shouldCreateTaskFromLinearEvent({
+      stateType: "completed",
+      labelNames: [],
+    });
+    expect(decision).toEqual({ create: false, reason: "completed" });
+    restore();
+  });
+
+  test("LINEAR_ALLOWED_STATES handles whitespace and case", () => {
+    process.env.LINEAR_ALLOWED_STATES = "  Unstarted ,  STARTED  ,backlog";
+    expect(shouldCreateTaskFromLinearEvent({ stateType: "backlog", labelNames: [] }).create).toBe(
+      true,
+    );
+    expect(shouldCreateTaskFromLinearEvent({ stateType: "completed", labelNames: [] }).create).toBe(
+      false,
+    );
+    restore();
+  });
+
+  test("empty LINEAR_ALLOWED_STATES locks down everything but label override", () => {
+    process.env.LINEAR_ALLOWED_STATES = "";
+    expect(shouldCreateTaskFromLinearEvent({ stateType: "started", labelNames: [] })).toEqual({
+      create: false,
+      reason: "started",
+    });
+    expect(
+      shouldCreateTaskFromLinearEvent({
+        stateType: "started",
+        labelNames: [SWARM_READY_LABEL],
+      }).create,
+    ).toBe(true);
+    restore();
+  });
+
+  test("LINEAR_SWARM_READY_LABEL overrides the bypass label", () => {
+    process.env.LINEAR_SWARM_READY_LABEL = "go-now";
+    // The default label no longer triggers.
+    expect(
+      shouldCreateTaskFromLinearEvent({
+        stateType: "backlog",
+        labelNames: [SWARM_READY_LABEL],
+      }),
+    ).toEqual({ create: false, reason: "backlog" });
+    // The configured label does.
+    expect(
+      shouldCreateTaskFromLinearEvent({
+        stateType: "backlog",
+        labelNames: ["go-now"],
+      }),
+    ).toEqual({ create: true, reason: "label-override" });
+    restore();
+  });
+
+  test("LINEAR_SWARM_READY_LABEL match is case-insensitive", () => {
+    process.env.LINEAR_SWARM_READY_LABEL = "GO-NOW";
+    expect(
+      shouldCreateTaskFromLinearEvent({
+        stateType: "backlog",
+        labelNames: ["Go-Now"],
+      }).create,
+    ).toBe(true);
+    restore();
+  });
+
+  test("getLinearGateConfig reflects env at call time", () => {
+    process.env.LINEAR_ALLOWED_STATES = "started";
+    process.env.LINEAR_SWARM_READY_LABEL = "ship-it";
+    const cfg = getLinearGateConfig();
+    expect(cfg.allowedStateTypes).toEqual(new Set(["started"]));
+    expect(cfg.swarmReadyLabel).toBe("ship-it");
+    restore();
+  });
+
+  test("getLinearGateConfig falls back to defaults when env is unset", () => {
+    const cfg = getLinearGateConfig();
+    expect(cfg.allowedStateTypes).toEqual(new Set(DEFAULT_ALLOWED_STATE_TYPES));
+    expect(cfg.swarmReadyLabel).toBe(DEFAULT_SWARM_READY_LABEL);
+  });
+
+  test("buildSkipMessage uses the configured override label", () => {
+    process.env.LINEAR_SWARM_READY_LABEL = "go-now";
+    const msg = buildSkipMessage("backlog", getLinearGateConfig().swarmReadyLabel);
+    expect(msg).toContain("Backlog");
+    expect(msg).toContain("`go-now`");
+    expect(msg).not.toContain("`swarm-ready`");
+    restore();
+  });
+});
+
+// ─── handleAgentSessionEvent — state-gate skip path ──────────────────────────
+
+describe("handleAgentSessionEvent — state gate", () => {
+  test("skips task creation when issue.state.type is backlog", async () => {
+    const event = {
+      type: "AgentSession",
+      action: "create",
+      agentSession: {
+        id: "session-gate-backlog-001",
+        url: "https://linear.app/team/issue/ENG-500/agent",
+        issue: {
+          id: "issue-gate-backlog-001",
+          identifier: "ENG-500",
+          title: "Backlog ticket",
+          url: "https://linear.app/team/issue/ENG-500",
+          // Inline state/labels so the test doesn't need to mock GraphQL.
+          state: { type: "backlog" },
+          labels: [],
+        },
+      },
+    };
+
+    await handleAgentSessionEvent(event);
+
+    // No tracker_sync should have been created.
+    const sync = getTrackerSyncByExternalId("linear", "task", "issue-gate-backlog-001");
+    expect(sync).toBeNull();
+  });
+
+  test("skips task creation when issue.state.type is triage", async () => {
+    const event = {
+      type: "AgentSession",
+      action: "create",
+      agentSession: {
+        id: "session-gate-triage-001",
+        issue: {
+          id: "issue-gate-triage-001",
+          identifier: "ENG-501",
+          title: "Triage ticket",
+          url: "https://linear.app/team/issue/ENG-501",
+          state: { type: "triage" },
+          labels: { nodes: [] },
+        },
+      },
+    };
+
+    await handleAgentSessionEvent(event);
+
+    const sync = getTrackerSyncByExternalId("linear", "task", "issue-gate-triage-001");
+    expect(sync).toBeNull();
+  });
+
+  test("creates task when issue is in backlog but has swarm-ready label", async () => {
+    const event = {
+      type: "AgentSession",
+      action: "create",
+      agentSession: {
+        id: "session-gate-override-001",
+        issue: {
+          id: "issue-gate-override-001",
+          identifier: "ENG-502",
+          title: "Pre-staged backlog ticket",
+          url: "https://linear.app/team/issue/ENG-502",
+          state: { type: "backlog" },
+          labels: { nodes: [{ name: "bug" }, { name: SWARM_READY_LABEL }] },
+        },
+      },
+    };
+
+    await handleAgentSessionEvent(event);
+
+    const sync = getTrackerSyncByExternalId("linear", "task", "issue-gate-override-001");
+    expect(sync).not.toBeNull();
+    expect(sync!.externalIdentifier).toBe("ENG-502");
+    const task = getTaskById(sync!.swarmId);
+    expect(task).not.toBeNull();
+    expect(task!.source).toBe("linear");
+  });
+
+  test("LINEAR_ALLOWED_STATES env override widens the allowlist end-to-end", async () => {
+    process.env.LINEAR_ALLOWED_STATES = "unstarted,started,backlog";
+    try {
+      const event = {
+        type: "AgentSession",
+        action: "create",
+        agentSession: {
+          id: "session-gate-env-allow-001",
+          issue: {
+            id: "issue-gate-env-allow-001",
+            identifier: "ENG-510",
+            title: "Backlog ticket allowed via env",
+            url: "https://linear.app/team/issue/ENG-510",
+            state: { type: "backlog" },
+            labels: [],
+          },
+        },
+      };
+      await handleAgentSessionEvent(event);
+      const sync = getTrackerSyncByExternalId("linear", "task", "issue-gate-env-allow-001");
+      expect(sync).not.toBeNull();
+    } finally {
+      delete process.env.LINEAR_ALLOWED_STATES;
+    }
+  });
+
+  test("LINEAR_SWARM_READY_LABEL env override is honored end-to-end", async () => {
+    process.env.LINEAR_SWARM_READY_LABEL = "go-now";
+    try {
+      const event = {
+        type: "AgentSession",
+        action: "create",
+        agentSession: {
+          id: "session-gate-env-label-001",
+          issue: {
+            id: "issue-gate-env-label-001",
+            identifier: "ENG-511",
+            title: "Backlog ticket with custom override label",
+            url: "https://linear.app/team/issue/ENG-511",
+            state: { type: "backlog" },
+            labels: { nodes: [{ name: "go-now" }] },
+          },
+        },
+      };
+      await handleAgentSessionEvent(event);
+      const sync = getTrackerSyncByExternalId("linear", "task", "issue-gate-env-label-001");
+      expect(sync).not.toBeNull();
+    } finally {
+      delete process.env.LINEAR_SWARM_READY_LABEL;
+    }
+  });
+
+  test("creates task when issue is in unstarted (Todo) state", async () => {
+    const event = {
+      type: "AgentSession",
+      action: "create",
+      agentSession: {
+        id: "session-gate-todo-001",
+        issue: {
+          id: "issue-gate-todo-001",
+          identifier: "ENG-503",
+          title: "Ready ticket",
+          url: "https://linear.app/team/issue/ENG-503",
+          state: { type: "unstarted" },
+          labels: [],
+        },
+      },
+    };
+
+    await handleAgentSessionEvent(event);
+
+    const sync = getTrackerSyncByExternalId("linear", "task", "issue-gate-todo-001");
+    expect(sync).not.toBeNull();
+  });
+});

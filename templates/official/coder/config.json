@@ -1,0 +1,23 @@
+{
+  "name": "coder",
+  "displayName": "Coder",
+  "description": "Implementation-focused worker that turns plans into working code, creates PRs, and resolves review feedback fast",
+  "version": "1.0.0",
+  "category": "official",
+  "icon": "code",
+  "author": "Agent Swarm <contact@agent-swarm.dev>",
+  "createdAt": "2026-03-09",
+  "lastUpdatedAt": "2026-03-10",
+  "agentDefaults": {
+    "role": "worker",
+    "capabilities": ["implementation", "typescript", "git", "testing"],
+    "maxTasks": 3
+  },
+  "files": {
+    "claudeMd": "CLAUDE.md",
+    "soulMd": "SOUL.md",
+    "identityMd": "IDENTITY.md",
+    "toolsMd": "TOOLS.md",
+    "setupScript": "start-up.sh"
+  }
+}

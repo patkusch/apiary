@@ -1,0 +1,472 @@
+import { ensure } from "@desplega.ai/business-use";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import * as z from "zod";
+import {
+  completeTask,
+  createSessionCost,
+  createTaskExtended,
+  failTask,
+  getAgentById,
+  getDb,
+  getLeadAgent,
+  getSessionLogsByTaskId,
+  getTaskById,
+  updateAgentStatusFromCapacity,
+  updateTaskProgress,
+} from "@/be/db";
+import { getEmbeddingProvider, getMemoryStore } from "@/be/memory";
+import { getRetrievalsForTask } from "@/be/memory/raters/retrieval";
+import { runServerRaters } from "@/be/memory/raters/run-server-raters";
+import { resolveTemplate } from "@/prompts/resolver";
+import { createToolRegistrar } from "@/tools/utils";
+import { AgentTaskSchema } from "@/types";
+// Side-effect import: registers task lifecycle templates in the in-memory registry
+import "./templates";
+import { validateJsonSchema } from "@/workflows/json-schema-validator";
+
+// Schema for optional cost data that agents can self-report.
+// In practice the harness adapter (claude/codex/opencode/etc.) is the
+// authoritative source of cost data — it gets written via
+// POST /api/session-costs from the runner. Agents calling store-progress
+// rarely know the real numbers and have been observed echoing the example
+// values from this schema (e.g. model="opus" on a gpt-5-nano run). The
+// handler below silently drops payloads where every numeric field is zero.
+const CostDataSchema = z
+  .object({
+    totalCostUsd: z.number().min(0).describe("Total cost in USD"),
+    inputTokens: z.number().int().min(0).optional().describe("Input tokens used"),
+    outputTokens: z.number().int().min(0).optional().describe("Output tokens used"),
+    cacheReadTokens: z.number().int().min(0).optional().describe("Cache read tokens"),
+    cacheWriteTokens: z.number().int().min(0).optional().describe("Cache write tokens"),
+    durationMs: z.number().int().min(0).optional().describe("Duration in milliseconds"),
+    numTurns: z.number().int().min(1).optional().describe("Number of turns/iterations"),
+    model: z
+      .string()
+      .optional()
+      .describe(
+        "Model identifier reported by the agent (only set if the agent has the real ID; do NOT echo the schema example).",
+      ),
+  })
+  .describe(
+    "Optional self-reported cost data. The harness adapter writes the authoritative cost record automatically — only pass this if you have real, non-zero numbers from a model that doesn't surface usage to the harness.",
+  );
+
+export const registerStoreProgressTool = (server: McpServer) => {
+  createToolRegistrar(server)(
+    "store-progress",
+    {
+      title: "Store task progress",
+      description:
+        "Stores the progress of a specific task. Can also mark task as completed or failed, which will set the agent back to idle.",
+      annotations: { idempotentHint: true },
+
+      inputSchema: z.object({
+        taskId: z.uuid().describe("The ID of the task to update progress for."),
+        progress: z.string().optional().describe("The progress update to store."),
+        status: z
+          .enum(["completed", "failed"])
+          .optional()
+          .describe("Set to 'completed' or 'failed' to finish the task."),
+        output: z.string().optional().describe("The output of the task (used when completing)."),
+        failureReason: z
+          .string()
+          .optional()
+          .describe("The reason for failure (used when failing)."),
+        costData: CostDataSchema.optional().describe(
+          "Optional cost data for tracking session costs. When provided, a session cost record will be created linked to this task.",
+        ),
+      }),
+      outputSchema: z.object({
+        success: z.boolean(),
+        message: z.string(),
+        task: AgentTaskSchema.optional(),
+        yourAgentId: z.string().optional(),
+        wasNoOp: z
+          .boolean()
+          .optional()
+          .describe(
+            "True when the call was a no-op because the task was already in a terminal state (completed/failed/cancelled). First-call-wins.",
+          ),
+      }),
+    },
+    async ({ taskId, progress, status, output, failureReason, costData }, requestInfo, _meta) => {
+      if (!requestInfo.agentId) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: 'Agent ID not found. The MCP client should define the "X-Agent-ID" header.',
+            },
+          ],
+          structuredContent: {
+            yourAgentId: requestInfo.agentId,
+            success: false,
+            message: 'Agent ID not found. The MCP client should define the "X-Agent-ID" header.',
+          },
+        };
+      }
+
+      const txn = getDb().transaction(() => {
+        const agent = getAgentById(requestInfo.agentId ?? "");
+
+        if (!agent) {
+          return {
+            success: false,
+            message: `Agent with ID "${requestInfo.agentId}" not found in the swarm, register before storing task progress.`,
+          };
+        }
+
+        const existingTask = getTaskById(taskId);
+
+        if (!existingTask) {
+          return {
+            success: false,
+            message: `Task with ID "${taskId}" not found.`,
+          };
+        }
+
+        let updatedTask = existingTask;
+        const isTerminal = ["completed", "failed", "cancelled"].includes(existingTask.status);
+
+        // Idempotency guard: short-circuit terminal-status writes (completed/failed)
+        // BEFORE any side-effects fire (event emission, memory write, follow-up task,
+        // business-use ensure). Without this, a multi-session race causes duplicate
+        // follow-up tasks to lead, vector index pollution, and spurious BU events.
+        // First-call-wins: existing output / finishedAt are preserved.
+        if (status && isTerminal) {
+          return {
+            success: true,
+            message:
+              `Task "${taskId}" is already ${existingTask.status}; treating as no-op. ` +
+              `Existing output preserved (first-call-wins).`,
+            task: existingTask,
+            wasNoOp: true,
+          };
+        }
+
+        // Update progress if provided (with deduplication)
+        // Skip for tasks already in a terminal state to prevent zombie revival
+        if (progress && !isTerminal) {
+          // Skip if same progress text was set within the last 5 minutes
+          const isDuplicate =
+            existingTask.progress === progress &&
+            existingTask.lastUpdatedAt &&
+            Date.now() - new Date(existingTask.lastUpdatedAt).getTime() < 5 * 60 * 1000;
+
+          if (!isDuplicate) {
+            const result = updateTaskProgress(taskId, progress);
+            if (result) updatedTask = result;
+          }
+        }
+
+        // Validate structured output against outputSchema if present
+        if (
+          status === "completed" &&
+          existingTask.outputSchema &&
+          typeof existingTask.outputSchema === "object"
+        ) {
+          const schema = existingTask.outputSchema as Record<string, unknown>;
+          if (!output) {
+            return {
+              success: false,
+              message: `Task has an outputSchema but no output was provided. You must call store-progress with a valid JSON output matching this schema:\n${JSON.stringify(schema, null, 2)}`,
+            };
+          }
+
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(output);
+          } catch {
+            return {
+              success: false,
+              message: `Task output must be valid JSON matching the outputSchema. Got invalid JSON. Schema:\n${JSON.stringify(schema, null, 2)}`,
+            };
+          }
+
+          const validationErrors = validateJsonSchema(schema, parsed);
+          if (validationErrors.length > 0) {
+            return {
+              success: false,
+              message: `Task output does not match the outputSchema. Errors:\n${validationErrors.join("\n")}\n\nExpected schema:\n${JSON.stringify(schema, null, 2)}\n\nPlease fix your output and retry.`,
+            };
+          }
+        }
+
+        // Handle status change
+        if (status === "completed") {
+          const result = completeTask(taskId, output);
+          if (result) {
+            updatedTask = result;
+
+            ensure({
+              id: "completed",
+              flow: "task",
+              runId: taskId,
+              depIds: existingTask.wasPaused ? ["started", "resumed"] : ["started"],
+              data: {
+                taskId,
+                agentId: existingTask.agentId,
+                previousStatus: existingTask.status,
+                hasOutput: !!output,
+              },
+              validator: (data) => data.previousStatus === "in_progress",
+              // biome-ignore lint/correctness/noEmptyPattern: data unused, ctx needed
+              filter: ({}, ctx) => ctx.deps.length > 0,
+              conditions: [{ timeout_ms: 3_600_000 }], // 1 hour
+            });
+
+            if (existingTask.agentId) {
+              // Derive status from capacity instead of always setting idle
+              updateAgentStatusFromCapacity(existingTask.agentId);
+            }
+          }
+        } else if (status === "failed") {
+          const result = failTask(taskId, failureReason ?? "Unknown failure");
+          if (result) {
+            updatedTask = result;
+
+            ensure({
+              id: "failed",
+              flow: "task",
+              runId: taskId,
+              depIds: existingTask.wasPaused ? ["started", "resumed"] : ["started"],
+              data: {
+                taskId,
+                agentId: existingTask.agentId,
+                previousStatus: existingTask.status,
+                failureReason: failureReason ?? "Unknown failure",
+              },
+              validator: (data) => data.previousStatus === "in_progress",
+              // biome-ignore lint/correctness/noEmptyPattern: data unused, ctx needed
+              filter: ({}, ctx) => ctx.deps.length > 0,
+              conditions: [{ timeout_ms: 3_600_000 }], // 1 hour
+            });
+
+            if (existingTask.agentId) {
+              // Derive status from capacity instead of always setting idle
+              updateAgentStatusFromCapacity(existingTask.agentId);
+            }
+          }
+        } else {
+          // Progress update - ensure status reflects current load
+          if (existingTask.agentId) {
+            updateAgentStatusFromCapacity(existingTask.agentId);
+          }
+        }
+
+        // Store cost data only if the agent provided non-trivial numbers.
+        // Agents observed copying the schema example (e.g. model="opus"
+        // on a gpt-5-nano run) with all-zero token/cost fields, producing
+        // duplicate noise rows in session_costs alongside the harness's
+        // authoritative entry. Drop those silently.
+        const hasRealCost =
+          costData &&
+          (costData.totalCostUsd > 0 ||
+            (costData.inputTokens ?? 0) > 0 ||
+            (costData.outputTokens ?? 0) > 0 ||
+            (costData.cacheReadTokens ?? 0) > 0 ||
+            (costData.cacheWriteTokens ?? 0) > 0);
+
+        if (hasRealCost && requestInfo.agentId) {
+          createSessionCost({
+            sessionId: `mcp-${taskId}-${Date.now()}`, // Generate unique session ID for MCP-based tasks
+            taskId,
+            agentId: requestInfo.agentId,
+            totalCostUsd: costData.totalCostUsd,
+            inputTokens: costData.inputTokens ?? 0,
+            outputTokens: costData.outputTokens ?? 0,
+            cacheReadTokens: costData.cacheReadTokens ?? 0,
+            cacheWriteTokens: costData.cacheWriteTokens ?? 0,
+            durationMs: costData.durationMs ?? 0,
+            numTurns: costData.numTurns ?? 1,
+            model: costData.model ?? "unknown",
+            isError: status === "failed",
+          });
+        }
+
+        return {
+          success: true,
+          message: status
+            ? `Task "${taskId}" marked as ${status}.`
+            : `Progress stored for task "${taskId}".`,
+          task: updatedTask,
+        };
+      });
+
+      const result = txn();
+
+      // Index completed and failed tasks as memory (async, non-blocking).
+      // Skip on no-op (idempotent re-call on terminal task) to avoid duplicate
+      // memory entries / vector index pollution.
+      if (
+        (status === "completed" || status === "failed") &&
+        result.success &&
+        result.task &&
+        !("wasNoOp" in result && result.wasNoOp)
+      ) {
+        (async () => {
+          try {
+            const taskContent =
+              status === "completed"
+                ? `Task: ${result.task!.task}\n\nOutput:\n${output || "(no output)"}`
+                : `Task: ${result.task!.task}\n\nFailure reason:\n${failureReason || "No reason provided"}\n\nThis task failed. Learn from this to avoid repeating the mistake.`;
+
+            // Skip indexing if there's truly no content
+            if (taskContent.length < 30) return;
+
+            const store = getMemoryStore();
+            const provider = getEmbeddingProvider();
+
+            const memory = store.store({
+              agentId: requestInfo.agentId ?? null,
+              content: taskContent,
+              name: `Task: ${result.task!.task.slice(0, 80)}`,
+              scope: "agent",
+              source: "task_completion",
+              sourceTaskId: taskId,
+            });
+            const embedding = await provider.embed(taskContent);
+            if (embedding) {
+              store.updateEmbedding(memory.id, embedding, provider.name);
+            }
+
+            // Auto-promote high-value completions to swarm memory (P3)
+            const shouldShareWithSwarm =
+              status === "completed" &&
+              (result.task!.taskType === "research" ||
+                result.task!.tags?.includes("knowledge") ||
+                result.task!.tags?.includes("shared"));
+
+            if (shouldShareWithSwarm) {
+              try {
+                const swarmMemory = store.store({
+                  agentId: requestInfo.agentId ?? null,
+                  scope: "swarm",
+                  name: `Shared: ${result.task!.task.slice(0, 80)}`,
+                  content: `Task completed by agent ${requestInfo.agentId}:\n\n${taskContent}`,
+                  source: "task_completion",
+                  sourceTaskId: taskId,
+                });
+                const swarmEmbedding = await provider.embed(taskContent);
+                if (swarmEmbedding) {
+                  store.updateEmbedding(swarmMemory.id, swarmEmbedding, provider.name);
+                }
+              } catch {
+                // Non-blocking — swarm memory promotion failure is not critical
+              }
+            }
+          } catch {
+            // Non-blocking — task completion memory failure should not affect task status
+          }
+        })();
+
+        // Memory rater v1.5 — fire server-side raters on task completion.
+        // Plan: thoughts/taras/plans/2026-05-05-memory-rater-v1.5/step-2.md §5
+        //
+        // Read `memory_retrieval` rows for this task + concatenated session_logs
+        // and hand both to `runServerRaters`, which iterates the allow-listed
+        // server raters (currently just `implicit-citation`), stamps source,
+        // applies the configured weight multiplier, and persists via
+        // `applyRating`. The orchestration is extracted so it can be unit-tested
+        // with stub raters (see `src/tests/run-server-raters.test.ts`).
+        //
+        // Fire-and-forget: rater failure must NEVER affect task status.
+        (async () => {
+          try {
+            const retrievals = getRetrievalsForTask(taskId);
+            if (retrievals.length === 0) return;
+
+            const retrievedMemoryIds = retrievals.map((r) => r.memoryId);
+            const logs = getSessionLogsByTaskId(taskId);
+            const evidence = logs.map((l) => l.content).join("\n");
+
+            await runServerRaters({
+              taskId,
+              agentId: requestInfo.agentId ?? "",
+              retrievedMemoryIds,
+              evidence,
+            });
+          } catch (err) {
+            console.error(
+              "[store-progress] server-rater fire failed:",
+              err instanceof Error ? err.message : String(err),
+            );
+          }
+        })();
+      }
+
+      // Create follow-up task for the lead when a worker task finishes.
+      // This replaces the old poll-based tasks_finished trigger which was unreliable.
+      // Skip for workflow-managed tasks — the workflow engine handles sequencing via resume.ts.
+      // Skip on no-op (idempotent re-call on terminal task) to avoid duplicate follow-ups.
+      if (
+        status &&
+        result.success &&
+        result.task &&
+        !result.task.workflowRunId &&
+        !("wasNoOp" in result && result.wasNoOp)
+      ) {
+        try {
+          const taskAgent = getAgentById(result.task.agentId ?? "");
+          // Only create follow-ups for worker tasks (not lead's own tasks)
+          if (taskAgent && !taskAgent.isLead) {
+            const leadAgent = getLeadAgent();
+            if (leadAgent) {
+              const agentName = taskAgent.name || result.task.agentId?.slice(0, 8) || "Unknown";
+              const taskDesc = result.task.task.slice(0, 200);
+
+              let followUpDescription: string;
+              if (status === "completed") {
+                const outputSummary = output
+                  ? `${output.slice(0, 500)}${output.length > 500 ? "..." : ""}`
+                  : "(no output)";
+                const completedResult = resolveTemplate("task.worker.completed", {
+                  agent_name: agentName,
+                  task_desc: taskDesc,
+                  output_summary: outputSummary,
+                  task_id: taskId,
+                });
+                followUpDescription = completedResult.text;
+              } else {
+                const reason = failureReason || "(no reason given)";
+                const failedResult = resolveTemplate("task.worker.failed", {
+                  agent_name: agentName,
+                  task_desc: taskDesc,
+                  failure_reason: reason,
+                  task_id: taskId,
+                });
+                followUpDescription = failedResult.text;
+              }
+
+              // If the original task came from Slack, forward context so lead can reply
+              createTaskExtended(followUpDescription, {
+                agentId: leadAgent.id,
+                source: "system",
+                taskType: "follow-up",
+                parentTaskId: taskId,
+                slackChannelId: result.task.slackChannelId,
+                slackThreadTs: result.task.slackThreadTs,
+                slackUserId: result.task.slackUserId,
+              });
+
+              console.log(
+                `[store-progress] Created follow-up task for lead (${leadAgent.name}) — ${status} task ${taskId.slice(0, 8)} by ${agentName}`,
+              );
+            }
+          }
+        } catch (err) {
+          // Non-blocking — follow-up task creation failure should not affect the store-progress response
+          console.warn(`[store-progress] Failed to create follow-up task: ${err}`);
+        }
+      }
+
+      return {
+        content: [{ type: "text", text: result.message }],
+        structuredContent: {
+          yourAgentId: requestInfo.agentId,
+          ...result,
+        },
+      };
+    },
+  );
+};

@@ -1,0 +1,515 @@
+# Agent Swarm - Coolify Deployment (Build from Source)
+#
+# Required env vars (set in Coolify UI):
+#   - API_KEY: Secret key for API authentication
+#   - CLAUDE_CODE_OAUTH_TOKEN: From `claude setup-token`
+#
+# Optional env vars:
+#   - SLACK_BOT_TOKEN, SLACK_APP_TOKEN: For Slack integration
+#   - GITHUB_TOKEN: For git operations in workers
+#   - GITHUB_WEBHOOK_SECRET: For GitHub webhook integration
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    labels:
+      - "coolify.managed=true"
+      - "coolify.port=3013"
+    environment:
+      # Required
+      - API_KEY=${API_KEY:?}
+
+      # Database
+      - DATABASE_PATH=/data/agent-swarm-db.sqlite
+
+      # URLs
+      - APP_URL=${APP_URL:-}
+      - MCP_BASE_URL=${MCP_BASE_URL:-}
+
+      # Slack integration
+      - SLACK_DISABLE=${SLACK_DISABLE:-true}
+      - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN:-}
+      - SLACK_APP_TOKEN=${SLACK_APP_TOKEN:-}
+
+      # GitHub integration
+      - GITHUB_DISABLE=${GITHUB_DISABLE:-true}
+      - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET:-}
+      - GITHUB_BOT_NAME=${GITHUB_BOT_NAME:-agent-swarm-bot}
+      - GITHUB_APP_ID=${GITHUB_APP_ID:-}
+      - GITHUB_APP_PRIVATE_KEY=${GITHUB_APP_PRIVATE_KEY:-}
+
+    volumes:
+      - type: bind
+        source: ./data
+        target: /data
+        is_directory: true
+
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3013/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+
+  lead:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    restart: unless-stopped
+    stop_grace_period: 60s
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      # Required
+      - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:?}
+      - API_KEY=${API_KEY:?}
+
+      # Agent identity (stable ID for task resume)
+      - AGENT_ID=${AGENT_ID_LEAD:-d454d1a5-4df9-49bd-8a89-e58d6a657dc3}
+      - AGENT_NAME=${AGENT_NAME_LEAD:-lead}
+      - AGENT_ROLE=lead
+
+      # Internal connection to API
+      - MCP_BASE_URL=http://api:3013
+
+      # Behavior
+      - YOLO=${YOLO:-true}
+      - SHUTDOWN_TIMEOUT=${SHUTDOWN_TIMEOUT:-30000}
+
+      # Git config
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - GITHUB_EMAIL=${GITHUB_EMAIL:-agent@swarm.local}
+      - GITHUB_NAME=${GITHUB_NAME:-Agent Swarm}
+
+    volumes:
+      - type: bind
+        source: ./logs
+        target: /logs
+        is_directory: true
+      - type: bind
+        source: ./workspace/shared
+        target: /workspace/shared
+        is_directory: true
+      - type: bind
+        source: ./workspace/lead
+        target: /workspace/personal
+        is_directory: true
+
+    exclude_from_hc: true
+
+  worker-1:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    restart: unless-stopped
+    stop_grace_period: 60s
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      # Required
+      - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:?}
+      - API_KEY=${API_KEY:?}
+
+      # Agent identity (stable ID for task resume)
+      - AGENT_ID=${AGENT_ID_WORKER1:-38d36438-58a0-45b5-8602-a5d52b07c2f1}
+      - AGENT_NAME=${AGENT_NAME_WORKER1:-worker-1}
+      - AGENT_ROLE=worker
+
+      # Internal connection to API
+      - MCP_BASE_URL=http://api:3013
+
+      # Behavior
+      - YOLO=${YOLO:-true}
+      - SHUTDOWN_TIMEOUT=${SHUTDOWN_TIMEOUT:-30000}
+
+      # Git config
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - GITHUB_EMAIL=${GITHUB_EMAIL:-agent@swarm.local}
+      - GITHUB_NAME=${GITHUB_NAME:-Agent Swarm}
+
+      # Specialist prompt (optional)
+      - SYSTEM_PROMPT=${SYSTEM_PROMPT_WORKER1:-}
+
+    volumes:
+      - type: bind
+        source: ./logs
+        target: /logs
+        is_directory: true
+      - type: bind
+        source: ./workspace/shared
+        target: /workspace/shared
+        is_directory: true
+      - type: bind
+        source: ./workspace/worker-1
+        target: /workspace/personal
+        is_directory: true
+
+    exclude_from_hc: true
+
+  worker-2:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    restart: unless-stopped
+    stop_grace_period: 60s
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      # Required
+      - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:?}
+      - API_KEY=${API_KEY:?}
+
+      # Agent identity (stable ID for task resume)
+      - AGENT_ID=${AGENT_ID_WORKER2:-7904b1d0-110e-4e12-994b-6b468f0a4518}
+      - AGENT_NAME=${AGENT_NAME_WORKER2:-worker-2}
+      - AGENT_ROLE=worker
+
+      # Internal connection to API
+      - MCP_BASE_URL=http://api:3013
+
+      # Behavior
+      - YOLO=${YOLO:-true}
+      - SHUTDOWN_TIMEOUT=${SHUTDOWN_TIMEOUT:-30000}
+
+      # Git config
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - GITHUB_EMAIL=${GITHUB_EMAIL:-agent@swarm.local}
+      - GITHUB_NAME=${GITHUB_NAME:-Agent Swarm}
+
+      # Specialist prompt (optional)
+      - SYSTEM_PROMPT=${SYSTEM_PROMPT_WORKER2:-}
+
+    volumes:
+      - type: bind
+        source: ./logs
+        target: /logs
+        is_directory: true
+      - type: bind
+        source: ./workspace/shared
+        target: /workspace/shared
+        is_directory: true
+      - type: bind
+        source: ./workspace/worker-2
+        target: /workspace/personal
+        is_directory: true
+
+    exclude_from_hc: true
+
+  worker-3:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    restart: unless-stopped
+    stop_grace_period: 60s
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      # Required
+      - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:?}
+      - API_KEY=${API_KEY:?}
+
+      # Agent identity (stable ID for task resume)
+      - AGENT_ID=${AGENT_ID_WORKER3:-f00ed190-8066-4e4a-b7b7-f688e407430c}
+      - AGENT_NAME=${AGENT_NAME_WORKER3:-worker-3}
+      - AGENT_ROLE=worker
+
+      # Internal connection to API
+      - MCP_BASE_URL=http://api:3013
+
+      # Behavior
+      - YOLO=${YOLO:-true}
+      - SHUTDOWN_TIMEOUT=${SHUTDOWN_TIMEOUT:-30000}
+
+      # Git config
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - GITHUB_EMAIL=${GITHUB_EMAIL:-agent@swarm.local}
+      - GITHUB_NAME=${GITHUB_NAME:-Agent Swarm}
+
+      # Specialist prompt (optional)
+      - SYSTEM_PROMPT=${SYSTEM_PROMPT_WORKER3:-}
+
+    volumes:
+      - type: bind
+        source: ./logs
+        target: /logs
+        is_directory: true
+      - type: bind
+        source: ./workspace/shared
+        target: /workspace/shared
+        is_directory: true
+      - type: bind
+        source: ./workspace/worker-3
+        target: /workspace/personal
+        is_directory: true
+
+    exclude_from_hc: true
+
+  worker-4:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    restart: unless-stopped
+    stop_grace_period: 60s
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      # Required
+      - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:?}
+      - API_KEY=${API_KEY:?}
+
+      # Agent identity (stable ID for task resume)
+      - AGENT_ID=${AGENT_ID_WORKER4:-a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d}
+      - AGENT_NAME=${AGENT_NAME_WORKER4:-worker-4}
+      - AGENT_ROLE=worker
+
+      # Internal connection to API
+      - MCP_BASE_URL=http://api:3013
+
+      # Behavior
+      - YOLO=${YOLO:-true}
+      - SHUTDOWN_TIMEOUT=${SHUTDOWN_TIMEOUT:-30000}
+
+      # Git config
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - GITHUB_EMAIL=${GITHUB_EMAIL:-agent@swarm.local}
+      - GITHUB_NAME=${GITHUB_NAME:-Agent Swarm}
+
+      # Specialist prompt (optional)
+      - SYSTEM_PROMPT=${SYSTEM_PROMPT_WORKER4:-}
+
+    volumes:
+      - type: bind
+        source: ./logs
+        target: /logs
+        is_directory: true
+      - type: bind
+        source: ./workspace/shared
+        target: /workspace/shared
+        is_directory: true
+      - type: bind
+        source: ./workspace/worker-4
+        target: /workspace/personal
+        is_directory: true
+
+    exclude_from_hc: true
+
+  worker-5:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    restart: unless-stopped
+    stop_grace_period: 60s
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      # Required
+      - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:?}
+      - API_KEY=${API_KEY:?}
+
+      # Agent identity (stable ID for task resume)
+      - AGENT_ID=${AGENT_ID_WORKER5:-b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e}
+      - AGENT_NAME=${AGENT_NAME_WORKER5:-worker-5}
+      - AGENT_ROLE=worker
+
+      # Internal connection to API
+      - MCP_BASE_URL=http://api:3013
+
+      # Behavior
+      - YOLO=${YOLO:-true}
+      - SHUTDOWN_TIMEOUT=${SHUTDOWN_TIMEOUT:-30000}
+
+      # Git config
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - GITHUB_EMAIL=${GITHUB_EMAIL:-agent@swarm.local}
+      - GITHUB_NAME=${GITHUB_NAME:-Agent Swarm}
+
+      # Specialist prompt (optional)
+      - SYSTEM_PROMPT=${SYSTEM_PROMPT_WORKER5:-}
+
+    volumes:
+      - type: bind
+        source: ./logs
+        target: /logs
+        is_directory: true
+      - type: bind
+        source: ./workspace/shared
+        target: /workspace/shared
+        is_directory: true
+      - type: bind
+        source: ./workspace/worker-5
+        target: /workspace/personal
+        is_directory: true
+
+    exclude_from_hc: true
+
+  worker-6:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    restart: unless-stopped
+    stop_grace_period: 60s
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      # Required
+      - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:?}
+      - API_KEY=${API_KEY:?}
+
+      # Agent identity (stable ID for task resume)
+      - AGENT_ID=${AGENT_ID_WORKER6:-c3d4e5f6-a7b8-4c9d-0e1f-2a3b4c5d6e7f}
+      - AGENT_NAME=${AGENT_NAME_WORKER6:-worker-6}
+      - AGENT_ROLE=worker
+
+      # Internal connection to API
+      - MCP_BASE_URL=http://api:3013
+
+      # Behavior
+      - YOLO=${YOLO:-true}
+      - SHUTDOWN_TIMEOUT=${SHUTDOWN_TIMEOUT:-30000}
+
+      # Git config
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - GITHUB_EMAIL=${GITHUB_EMAIL:-agent@swarm.local}
+      - GITHUB_NAME=${GITHUB_NAME:-Agent Swarm}
+
+      # Specialist prompt (optional)
+      - SYSTEM_PROMPT=${SYSTEM_PROMPT_WORKER6:-}
+
+    volumes:
+      - type: bind
+        source: ./logs
+        target: /logs
+        is_directory: true
+      - type: bind
+        source: ./workspace/shared
+        target: /workspace/shared
+        is_directory: true
+      - type: bind
+        source: ./workspace/worker-6
+        target: /workspace/personal
+        is_directory: true
+
+    exclude_from_hc: true
+
+  worker-7:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    restart: unless-stopped
+    stop_grace_period: 60s
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      # Required
+      - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:?}
+      - API_KEY=${API_KEY:?}
+
+      # Agent identity (stable ID for task resume)
+      - AGENT_ID=${AGENT_ID_WORKER7:-d4e5f6a7-b8c9-4d0e-1f2a-3b4c5d6e7f8a}
+      - AGENT_NAME=${AGENT_NAME_WORKER7:-worker-7}
+      - AGENT_ROLE=worker
+
+      # Internal connection to API
+      - MCP_BASE_URL=http://api:3013
+
+      # Behavior
+      - YOLO=${YOLO:-true}
+      - SHUTDOWN_TIMEOUT=${SHUTDOWN_TIMEOUT:-30000}
+
+      # Git config
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - GITHUB_EMAIL=${GITHUB_EMAIL:-agent@swarm.local}
+      - GITHUB_NAME=${GITHUB_NAME:-Agent Swarm}
+
+      # Specialist prompt (optional)
+      - SYSTEM_PROMPT=${SYSTEM_PROMPT_WORKER7:-}
+
+    volumes:
+      - type: bind
+        source: ./logs
+        target: /logs
+        is_directory: true
+      - type: bind
+        source: ./workspace/shared
+        target: /workspace/shared
+        is_directory: true
+      - type: bind
+        source: ./workspace/worker-7
+        target: /workspace/personal
+        is_directory: true
+
+    exclude_from_hc: true
+
+  worker-8:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    restart: unless-stopped
+    stop_grace_period: 60s
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      # Required
+      - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:?}
+      - API_KEY=${API_KEY:?}
+
+      # Agent identity (stable ID for task resume)
+      - AGENT_ID=${AGENT_ID_WORKER8:-e5f6a7b8-c9d0-4e1f-2a3b-4c5d6e7f8a9b}
+      - AGENT_NAME=${AGENT_NAME_WORKER8:-worker-8}
+      - AGENT_ROLE=worker
+
+      # Internal connection to API
+      - MCP_BASE_URL=http://api:3013
+
+      # Behavior
+      - YOLO=${YOLO:-true}
+      - SHUTDOWN_TIMEOUT=${SHUTDOWN_TIMEOUT:-30000}
+
+      # Git config
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - GITHUB_EMAIL=${GITHUB_EMAIL:-agent@swarm.local}
+      - GITHUB_NAME=${GITHUB_NAME:-Agent Swarm}
+
+      # Specialist prompt (optional)
+      - SYSTEM_PROMPT=${SYSTEM_PROMPT_WORKER8:-}
+
+    volumes:
+      - type: bind
+        source: ./logs
+        target: /logs
+        is_directory: true
+      - type: bind
+        source: ./workspace/shared
+        target: /workspace/shared
+        is_directory: true
+      - type: bind
+        source: ./workspace/worker-8
+        target: /workspace/personal
+        is_directory: true
+
+    exclude_from_hc: true
+
+  dashboard:
+    build:
+      context: ./ui
+      dockerfile: Dockerfile
+      args:
+        - VITE_API_URL=${APP_URL:-https://swarm.cool.jamalavedra.com}
+    restart: unless-stopped
+    depends_on:
+      - api
+    labels:
+      - "coolify.managed=true"
+      - "coolify.port=80"

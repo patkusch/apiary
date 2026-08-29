@@ -1,0 +1,278 @@
+/**
+ * System prompt assembly for agent sessions.
+ *
+ * Uses the template registry (session-templates.ts) for the core prompt
+ * building blocks. Dynamic sections (identity, repo context, CLAUDE.md,
+ * TOOLS.md) and conditional sections (agent_fs, services, artifacts) are
+ * still assembled here based on runtime state.
+ */
+
+import type { ProviderTraits } from "../providers/types";
+import { resolveTemplateAsync } from "./resolver";
+
+// Side-effect import: register all system + session templates
+import "./session-templates";
+
+/** Max characters per individual injected section before truncation */
+const BOOTSTRAP_MAX_CHARS = 20_000;
+
+/** Max total characters across all injected sections combined */
+const BOOTSTRAP_TOTAL_MAX_CHARS = 150_000;
+
+/** Truncation notice appended when a section is cut */
+const truncationNotice = (file: string) =>
+  `\n\n[...truncated, see /workspace/${file} for full content]\n`;
+
+export type BasePromptArgs = {
+  role: string;
+  agentId: string;
+  swarmUrl: string;
+  capabilities?: string[];
+  traits?: ProviderTraits;
+  name?: string;
+  description?: string;
+  soulMd?: string;
+  identityMd?: string;
+  toolsMd?: string;
+  claudeMd?: string;
+  repoContext?: {
+    claudeMd?: string | null;
+    clonePath: string;
+    warning?: string | null;
+    guidelines?: {
+      prChecks: string[];
+      mergeChecks: string[];
+      allowMerge?: boolean;
+      review: string[];
+    } | null;
+  };
+  /** Slack context from the current task, if present */
+  slackContext?: { channelId: string; threadTs?: string };
+  /** Pre-fetched skill summaries for the installed skills section */
+  skillsSummary?: { name: string; description: string }[];
+  /** Pre-fetched MCP server summaries for the installed MCP servers section */
+  mcpServersSummary?: string;
+};
+
+export const getBasePrompt = async (args: BasePromptArgs): Promise<string> => {
+  const { role, agentId, swarmUrl, traits } = args;
+  const { hasMcp = true, hasLocalEnvironment: hasLocalEnv = true } = traits ?? {};
+
+  const vars: Record<string, string> = { role, agentId, swarmUrl };
+
+  // Resolve the composite session template (trait-aware for remote providers)
+  let compositeEventType: string;
+  if (!hasMcp) {
+    // If no MCP, role cannot be lead
+    compositeEventType = "system.session.worker.remote";
+  } else {
+    compositeEventType = role === "lead" ? "system.session.lead" : "system.session.worker";
+  }
+  const compositeResult = await resolveTemplateAsync(compositeEventType, vars);
+  let prompt = compositeResult.text;
+
+  // Conditionally inject Slack instructions for workers with Slack-originated tasks
+  // Skip for providers without MCP — they can't call Slack tools (slack-reply, etc.)
+  if (role !== "lead" && args.slackContext && hasMcp) {
+    const slackResult = await resolveTemplateAsync("system.agent.worker.slack", {
+      slackChannelId: args.slackContext.channelId,
+      slackThreadTs: args.slackContext.threadTs ?? "",
+    });
+    prompt += slackResult.text;
+  }
+
+  // Inject agent identity
+  if (!hasLocalEnv) {
+    // Simplified identity for remote providers — no self-evolution, no /workspace files
+    prompt += "\n\n## Your Identity\n\n";
+    if (args.name) {
+      prompt += `**Name:** ${args.name}\n`;
+      if (args.description) {
+        prompt += `**Description:** ${args.description}\n`;
+      }
+      prompt += "\n";
+    }
+    prompt += `You are part of an agent swarm managed by the Desplega platform. `;
+    prompt += `You receive tasks from the swarm's lead agent and execute them independently. `;
+    prompt += `Focus on quality work and clear communication of results.\n`;
+  } else if (args.soulMd || args.identityMd || args.name) {
+    prompt += "\n\n## Your Identity\n\n";
+    if (args.name) {
+      prompt += `**Name:** ${args.name}\n`;
+      if (args.description) {
+        prompt += `**Description:** ${args.description}\n`;
+      }
+      prompt += "\n";
+    }
+    if (args.soulMd) {
+      prompt += `${args.soulMd}\n`;
+    }
+    if (args.identityMd) {
+      prompt += `${args.identityMd}\n`;
+    }
+  }
+
+  // Installed skills section (progressive disclosure — name + description only)
+  // Skip for providers without MCP — skills require the Skill MCP tool
+  if (hasMcp && args.skillsSummary && args.skillsSummary.length > 0) {
+    const summaries = args.skillsSummary.map((s) => `- /${s.name}: ${s.description}`).join("\n");
+    prompt += `\n\n## Installed Skills\n\nThe following skills are available. Use the Skill tool to invoke them by name.\n\n${summaries}\n`;
+  }
+
+  // Installed MCP servers section — skip for providers without MCP
+  if (hasMcp && args.mcpServersSummary) {
+    prompt += `\n\n## Installed MCP Servers\n\nThe following MCP servers are configured for your use:\n${args.mcpServersSummary}\n`;
+  }
+
+  // Repo context (protected, never truncated)
+  if (args.repoContext) {
+    prompt += "\n\n## Repository Context\n\n";
+
+    if (args.repoContext.warning) {
+      prompt += `WARNING: ${args.repoContext.warning}\n\n`;
+    }
+
+    if (hasLocalEnv) {
+      if (args.repoContext.claudeMd) {
+        prompt += `The following CLAUDE.md is from the repository cloned at \`${args.repoContext.clonePath}\`. `;
+        prompt += `**IMPORTANT: These instructions apply ONLY when working within the \`${args.repoContext.clonePath}\` directory.** `;
+        prompt += `Do NOT apply these rules to files outside that directory.\n\n`;
+        prompt += `${args.repoContext.claudeMd}\n`;
+      } else if (!args.repoContext.warning) {
+        prompt += `Repository is cloned at \`${args.repoContext.clonePath}\` but has no CLAUDE.md file.\n`;
+      }
+    }
+
+    // Inject repo guidelines
+    const g = args.repoContext.guidelines;
+    if (g === null || g === undefined) {
+      prompt += `\n### Repository Guidelines\n\nNo repository guidelines defined. If you need to push code, ask the lead or user to define guidelines first.\n`;
+    } else {
+      const hasAnyContent =
+        g.prChecks.length > 0 || g.mergeChecks.length > 0 || g.review.length > 0 || g.allowMerge;
+      if (hasAnyContent) {
+        prompt += `\n### Repository Guidelines (MANDATORY)\n\n`;
+        if (g.prChecks.length > 0) {
+          prompt += `**PR Checks — Run ALL before pushing code or creating a PR:**\n`;
+          g.prChecks.forEach((check, i) => {
+            prompt += `${i + 1}. \`${check}\`\n`;
+          });
+          prompt += `If ANY check fails, fix the issue before pushing. Do NOT push code with failing checks.\nDo NOT use \`--no-verify\` or any flag that bypasses git hooks.\n\n`;
+        }
+        prompt += `**Merge Policy:**\n`;
+        prompt += `- Auto-merge: ${g.allowMerge ? "Allowed" : "Not allowed (default)"}\n`;
+        if (g.mergeChecks.length > 0) {
+          prompt += `- Before merging, verify:\n`;
+          g.mergeChecks.forEach((check) => {
+            prompt += `  - ${check}\n`;
+          });
+        }
+        prompt += `\n`;
+        if (g.review.length > 0) {
+          prompt += `**Review Guidance:**\n`;
+          g.review.forEach((item) => {
+            prompt += `- ${item}\n`;
+          });
+          prompt += `\n`;
+        }
+      }
+    }
+  }
+
+  // Skip conditional suffix and truncatable sections for remote providers — these
+  // reference local Docker environment features (agent-fs, services, artifacts, /workspace files)
+  if (hasLocalEnv) {
+    // Build conditional suffix (sections that depend on runtime env/capabilities)
+    let conditionalSuffix = "";
+
+    // Conditionally include agent-fs instructions when available
+    if (process.env.AGENT_FS_API_URL) {
+      const sharedOrgId = process.env.AGENT_FS_SHARED_ORG_ID || "YOUR_SHARED_ORG_ID";
+      const agentFsResult = await resolveTemplateAsync("system.agent.agent_fs", {
+        agentId,
+        sharedOrgId,
+      });
+      conditionalSuffix += agentFsResult.text;
+    }
+
+    if (!args.capabilities || args.capabilities.includes("services")) {
+      const servicesResult = await resolveTemplateAsync("system.agent.services", {
+        agentId,
+        swarmUrl,
+      });
+      conditionalSuffix += servicesResult.text;
+    }
+
+    if (!args.capabilities || args.capabilities.includes("artifacts")) {
+      const artifactsResult = await resolveTemplateAsync("system.agent.artifacts", {});
+      conditionalSuffix += artifactsResult.text;
+    }
+
+    if (args.capabilities) {
+      conditionalSuffix += `
+### Capabilities enabled for this agent:
+
+- ${args.capabilities.join("\n- ")}
+`;
+    }
+
+    // Inject truncatable sections with per-section and total character caps
+    // Priority: agent CLAUDE.md > tools (tools cut first when over total budget)
+    const protectedLength = prompt.length + conditionalSuffix.length;
+    const totalBudget = Math.max(0, BOOTSTRAP_TOTAL_MAX_CHARS - protectedLength);
+    let totalUsed = 0;
+
+    // Agent CLAUDE.md (higher priority — injected first)
+    if (args.claudeMd) {
+      const perSectionBudget = Math.min(BOOTSTRAP_MAX_CHARS, totalBudget - totalUsed);
+      const section = truncateSection(
+        args.claudeMd,
+        "## Agent Instructions",
+        "CLAUDE.md",
+        perSectionBudget,
+      );
+      prompt += section;
+      totalUsed += section.length;
+    }
+
+    // Tools (lower priority — gets whatever budget remains)
+    if (args.toolsMd) {
+      const perSectionBudget = Math.min(BOOTSTRAP_MAX_CHARS, totalBudget - totalUsed);
+      const section = truncateSection(
+        args.toolsMd,
+        "## Your Tools & Capabilities",
+        "TOOLS.md",
+        perSectionBudget,
+      );
+      prompt += section;
+      totalUsed += section.length;
+    }
+
+    prompt += conditionalSuffix;
+  }
+
+  return prompt;
+};
+
+/** Truncate a section to fit within a character budget, appending a notice if cut */
+function truncateSection(
+  content: string | undefined,
+  header: string,
+  fileName: string,
+  budget: number,
+): string {
+  if (!content || budget <= 0) return "";
+
+  const fullSection = `\n\n${header}\n\n${content}\n`;
+  if (fullSection.length <= budget) return fullSection;
+
+  const headerStr = `\n\n${header}\n\n`;
+  const notice = truncationNotice(fileName);
+  const contentBudget = budget - headerStr.length - notice.length;
+
+  if (contentBudget > 0) {
+    return headerStr + content.slice(0, contentBudget) + notice;
+  }
+
+  return "";
+}

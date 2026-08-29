@@ -1,0 +1,375 @@
+---
+title: Environment Variables
+description: Complete reference for all configuration environment variables
+---
+
+Complete reference for all environment variables used by Agent Swarm.
+
+## Server Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | `3013` | Port for MCP HTTP server |
+| `API_KEY` | — | API key for server authentication (required) |
+| `MCP_BASE_URL` | `https://agent-swarm-mcp.desplega.sh` | Base URL for MCP server |
+| `SWARM_URL` | `localhost` | Base domain for service discovery |
+| `APP_URL` | — | Dashboard URL for Slack message links |
+| `ENV` | — | Environment mode (`development` adds prefix to Slack agent names) |
+| `DATABASE_PATH` | `./agent-swarm-db.sqlite` | SQLite database file path |
+| `SQLITE_VEC_EXTENSION_PATH` | — | Path to `vec0.so` native extension for sqlite-vec vector search. Set automatically in the Docker image (`/app/extensions/vec0.so`). Only needed for non-Docker deployments. |
+| `SECRETS_ENCRYPTION_KEY` | Auto-generated on first boot | Master key for encrypting `swarm_config` secret rows at rest. Accepts base64 (43-char, e.g. `openssl rand -base64 32`) **or** 64-char hex (e.g. `openssl rand -hex 32`). Decodes to exactly 32 bytes. **Reserved**: cannot be stored in the DB config store. See [Encryption Key](/docs/guides/deployment#encryption-key). |
+| `SECRETS_ENCRYPTION_KEY_FILE` | — | Alternative to `SECRETS_ENCRYPTION_KEY`: absolute path to a file whose contents are the base64- or hex-encoded key. Useful with Docker secrets or k8s `Secret` volume mounts. |
+| `SCHEDULER_INTERVAL_MS` | `10000` | Polling interval for scheduled tasks (ms) |
+| `OPENAI_API_KEY` | — | Fallback key for memory embeddings (used when `EMBEDDING_API_KEY` is unset). |
+| `EMBEDDING_API_KEY` | — | API key for the embedding provider. Takes precedence over `OPENAI_API_KEY`. |
+| `EMBEDDING_API_BASE_URL` | — | Optional custom OpenAI-compatible base URL (e.g. Azure OpenAI, Together, vLLM, Ollama). Leave unset to hit `api.openai.com`. |
+| `EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model slug sent to the provider. |
+| `EMBEDDING_DIMENSIONS` | `512` | Vector dimensions requested from the model. Must match what the model supports. |
+| `MEMORY_RECENCY_HALF_LIFE_DAYS` | `14` | Days until memory recency decay reaches 0.5 |
+| `MEMORY_ACCESS_BOOST_MAX` | `1.5` | Maximum access boost multiplier for reranking |
+| `MEMORY_ACCESS_RECENCY_HOURS` | `48` | Hours within which access counts for full boost |
+| `MEMORY_CANDIDATE_MULTIPLIER` | `3` | Candidate set size relative to requested limit |
+| `OPENROUTER_API_KEY` | — | Required for the Stop-hook session summarizer + LLM memory rater (calls go through the Vercel AI SDK against OpenRouter). When unset, both session-summary indexing and the `llm` rater are no-ops |
+| `MEMORY_RATER_LLM_MODEL` | `google/gemini-3-flash-preview` | OpenRouter model slug used by the Stop-hook summarizer + LLM rater. Override with any OpenRouter slug (e.g. `anthropic/claude-haiku-4.5`) |
+| `MEMORY_LLM_RATER_ENABLED` | `false` | When `true`, the same summarizer call also produces structured `useful: true | false` ratings for memories retrieved into the task's prompt |
+| `CAPABILITIES` | All enabled | Comma-separated feature flags |
+| `HEARTBEAT_INTERVAL_MS` | `90000` | Heartbeat sweep interval (ms) |
+| `HEARTBEAT_DISABLE` | `false` | Set to `true` to disable the heartbeat module |
+| `HEARTBEAT_STALL_THRESHOLD_MIN` | `30` | Minutes before an in-progress task is considered stalled |
+| `HEARTBEAT_STALE_CLEANUP_MIN` | `30` | Minutes before stale resources (sessions, reviewing tasks) are cleaned up |
+| `HEARTBEAT_MAX_AUTO_ASSIGN` | `5` | Max pool tasks to auto-assign per sweep |
+
+<Callout type="warn">
+**Encryption key resolution** (see [Encryption Key](/docs/guides/deployment#encryption-key) for the full guide):
+
+1. `SECRETS_ENCRYPTION_KEY` env var
+2. `SECRETS_ENCRYPTION_KEY_FILE` env var (path to a file containing the key)
+3. `<data-dir>/.encryption-key` on the API's data volume
+4. Auto-generated on first boot **only** when the DB does not yet contain encrypted secret rows
+
+Losing the key while keeping the database means losing every encrypted secret with no recovery path. Back up the key alongside every database backup.
+</Callout>
+
+## Docker Worker Variables
+
+### Harness Provider
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `HARNESS_PROVIDER` | No | `claude` | AI provider: `claude` (Claude Code), `codex`, `opencode`, `pi` (pi-mono), `devin` (Devin), or `claude-managed` (Anthropic Managed Agents). See [Harness Configuration](/docs/guides/harness-configuration) |
+
+### Credentials
+
+Which credentials you need depends on your selected harness provider:
+
+**Claude Code** (`HARNESS_PROVIDER=claude`, default):
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `CLAUDE_CODE_OAUTH_TOKEN` | Yes* | — | OAuth token for Claude CLI. Supports comma-separated values for [multi-credential load balancing](#multi-credential-support) |
+| `ANTHROPIC_API_KEY` | Alt* | — | Alternative to `CLAUDE_CODE_OAUTH_TOKEN`. Also supports comma-separated values |
+| `CLAUDE_BINARY` | No | `claude` | Path to Claude CLI binary (if not in `$PATH`) |
+| `ENABLE_PROMPT_CACHING_1H` | No | `1` | Enables Anthropic's 1-hour prompt cache for every Claude Code session spawned by the worker. Default-on since `v1.69.1`; set to `0` (env or `swarm_config`) to opt out. Injected by `ClaudeAdapter` into the spawned `claude` process env. |
+
+\* One of `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` is required.
+
+**pi-mono** (`HARNESS_PROVIDER=pi`):
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `ANTHROPIC_API_KEY` | One of* | — | Anthropic API key for Claude models via pi-mono |
+| `OPENROUTER_API_KEY` | One of* | — | OpenRouter API key for multi-provider model access |
+
+\* At least one credential source is required (API key or `~/.pi/agent/auth.json`). **Do not** pass `CLAUDE_CODE_OAUTH_TOKEN` when using pi-mono — it will override the configured provider. See [Harness Configuration](/docs/guides/harness-configuration) for details.
+
+**Codex** (`HARNESS_PROVIDER=codex`):
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `OPENAI_API_KEY` | Optional | — | Standard OpenAI API key for Codex |
+| `API_KEY` | Yes | — | Swarm API key used to fetch `codex_oauth` from the config store |
+| `MCP_BASE_URL` | Yes | `http://host.docker.internal:3013` | Swarm API URL reachable by the worker |
+
+Codex can also authenticate through `~/.codex/auth.json`, including ChatGPT OAuth restored from the swarm config store. See [Provider Auth: Codex OAuth](/docs/guides/provider-auth/codex-oauth).
+
+**opencode** (`HARNESS_PROVIDER=opencode`):
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `OPENROUTER_API_KEY` | One of* | — | OpenRouter API key (primary — unlocks 100+ models at [openrouter.ai](https://openrouter.ai)) |
+| `ANTHROPIC_API_KEY` | One of* | — | Anthropic API key for Claude models |
+| `OPENAI_API_KEY` | One of* | — | OpenAI API key for GPT models |
+| `OPENCODE_BINARY` | No | `opencode` | Path to the opencode CLI binary (if not in `$PATH`) |
+| `MODEL_OVERRIDE` | No | `openrouter/qwen/qwen3-coder-flash` | Model string passed to opencode. Use `provider/model-id` format (e.g. `anthropic/claude-sonnet-4-6`, `openai/gpt-4o`) |
+
+\* At least one of `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `~/.local/share/opencode/auth.json` is required.
+
+**Devin** (`HARNESS_PROVIDER=devin`):
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `DEVIN_API_KEY` | Yes | — | Devin API key (prefix: `cog_*`) |
+| `DEVIN_ORG_ID` | Yes | — | Devin organization ID (prefix: `org-*`) |
+| `DEVIN_POLL_INTERVAL_MS` | No | `15000` | Polling interval for Devin session events (ms) |
+| `DEVIN_ACU_COST_USD` | No | `2.25` | USD per ACU for cost tracking |
+| `DEVIN_API_BASE_URL` | No | `https://api.devin.ai` | Devin API base URL (override for testing) |
+| `DEVIN_MAX_ACU_LIMIT` | No | — | Per-session ACU cap (sent to Devin API + UI budget bar) |
+| `MAX_SKILL_CHARS` | No | `100000` | Max chars for inlined `SKILL.md` content |
+
+Starter env file: `.env.docker-devin.example` at the repo root.
+
+**Claude Managed Agents** (`HARNESS_PROVIDER=claude-managed`):
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `ANTHROPIC_API_KEY` | Yes | — | Anthropic API key (used by both the setup CLI and the runtime adapter) |
+| `MANAGED_AGENT_ID` | Yes | — | Anthropic Agent ID. Written by `claude-managed-setup` |
+| `MANAGED_ENVIRONMENT_ID` | Yes | — | Anthropic Environment ID. Written by `claude-managed-setup` |
+| `MCP_BASE_URL` | Yes | — | **Must be HTTPS-public** so Anthropic's sandbox can reach `/mcp`. Worker fails fast at boot otherwise |
+| `MANAGED_AGENT_MODEL` | No | `claude-sonnet-4-6` | Default model on `sessions.create`; per-task `task.model` overrides |
+| `MANAGED_GITHUB_VAULT_ID` | No | — | Anthropic vault ID holding a GitHub PAT, for repo-bound tasks (recommended for prod) |
+| `MANAGED_GITHUB_TOKEN` | No | — | Literal GitHub PAT injected as `authorization_token` on `github_repository` resources (dev-only fallback) |
+
+Run the one-time `bunx @desplega.ai/agent-swarm claude-managed-setup` from your laptop to bootstrap the Anthropic-side Agent + Environment and persist IDs into `swarm_config`. See [Harness Configuration § Claude Managed Agents](/docs/guides/harness-configuration#claude-managed-agents).
+
+### General Worker Settings
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `API_KEY` | Yes | — | API key for MCP server |
+| `AGENT_ID` | No | Auto-generated | Agent UUID. Keep stable for task resume |
+| `AGENT_ROLE` | No | `worker` | Role: `worker` or `lead` |
+| `AGENT_NAME` | No | Auto-generated | Display name for the agent |
+| `MCP_BASE_URL` | No | `http://host.docker.internal:3013` | MCP server URL |
+| `SESSION_ID` | No | Auto-generated | Log folder name |
+| `YOLO` | No | `false` | Continue on errors |
+| `SYSTEM_PROMPT` | No | — | Custom system prompt text |
+| `SYSTEM_PROMPT_FILE` | No | — | Path to system prompt file |
+| `STARTUP_SCRIPT_STRICT` | No | `true` | Exit on startup script failure |
+| `SHUTDOWN_TIMEOUT` | No | `30000` | Grace period (ms) before pausing tasks |
+| `MAX_CONCURRENT_TASKS` | No | `1` | Maximum parallel tasks per worker |
+| `SWARM_URL` | No | `localhost` | Base domain for service URLs |
+| `LEAD_PORT` | No | `3020` | Host port for lead service. Example variable used in `docker-compose.example.yml` — adjust to your setup. In isolated network namespaces all services can share the same port. |
+| `WORKER1_PORT` | No | `3021` | Host port for worker-1 service. Example — see `LEAD_PORT`. |
+| `WORKER2_PORT` | No | `3022` | Host port for worker-2 service. Example — see `LEAD_PORT`. |
+| `PM2_HOME` | No | `/workspace/.pm2` | PM2 state directory |
+| `TEMPLATE_ID` | No | — | Template for initial profile on first boot (e.g., `official/coder`) |
+| `TEMPLATE_REGISTRY_URL` | No | `https://templates.agent-swarm.dev` | URL of the templates registry |
+
+## Git Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GITHUB_TOKEN` | — | GitHub token for git operations |
+| `GITHUB_EMAIL` | `worker-agent@desplega.ai` | Git commit email |
+| `GITHUB_NAME` | `Worker Agent` | Git commit name |
+
+## Slack Integration
+
+| Variable | Description |
+|----------|-------------|
+| `SLACK_BOT_TOKEN` | Bot User OAuth Token (`xoxb-...`) |
+| `SLACK_APP_TOKEN` | App-Level Token for Socket Mode (`xapp-...`) |
+| `SLACK_SIGNING_SECRET` | Signing Secret (optional for Socket Mode) |
+| `SLACK_DISABLE` | Set to `true` to disable Slack |
+| `SLACK_ALLOWED_EMAIL_DOMAINS` | Comma-separated email domains |
+| `SLACK_ALLOWED_USER_IDS` | Comma-separated user IDs to always allow |
+| `ADDITIVE_SLACK` | Set to `true` to enable non-mention thread message buffering and batching |
+| `ADDITIVE_SLACK_BUFFER_MS` | Debounce window for thread buffer in ms (default: `10000`) |
+| `SLACK_THREAD_FOLLOWUP_REQUIRE_MENTION` | Set to `true` to require @mention for thread follow-up routing (default: `false`) |
+
+## GitHub Integration
+
+| Variable | Description |
+|----------|-------------|
+| `GITHUB_WEBHOOK_SECRET` | Webhook secret for GitHub App |
+| `GITHUB_BOT_NAME` | Bot name for @mentions (default: `agent-swarm-bot`) |
+| `GITHUB_BOT_ALIASES` | Comma-separated additional @mention aliases (e.g. `heysidekick,sidekick`) |
+| `GITHUB_EVENT_LABELS` | Comma-separated labels that trigger agent action on PR/issue label events (default: `swarm-review`) |
+| `GITHUB_APP_ID` | GitHub App ID (for bot reactions) |
+| `GITHUB_APP_PRIVATE_KEY` | GitHub App private key (base64-encoded) |
+| `GITHUB_DISABLE` | Set to `true` to disable GitHub |
+
+## GitLab Integration
+
+| Variable | Description |
+|----------|-------------|
+| `GITLAB_TOKEN` | GitLab PAT or Group Access Token for API calls |
+| `GITLAB_URL` | GitLab instance URL (default: `https://gitlab.com`) |
+| `GITLAB_WEBHOOK_SECRET` | Shared secret for webhook verification |
+| `GITLAB_BOT_NAME` | Bot username for @mention detection (default: `agent-swarm-bot`) |
+| `GITLAB_EMAIL` | Git commit email for GitLab repos |
+| `GITLAB_NAME` | Git commit name for GitLab repos |
+| `GITLAB_DISABLE` | Set to `true` to disable GitLab integration |
+
+## AgentMail Integration
+
+| Variable | Description |
+|----------|-------------|
+| `AGENTMAIL_DISABLE` | Set to `true` to skip AgentMail integration |
+| `AGENTMAIL_WEBHOOK_SECRET` | Svix signing secret for webhook verification |
+| `AGENTMAIL_INBOX_DOMAIN_FILTER` | Comma-separated domains to allow for incoming inbox webhooks (e.g., `yourdomain.com,example.com`). Unmatched inbox domains are silently dropped |
+| `AGENTMAIL_SENDER_DOMAIN_FILTER` | Comma-separated sender domains to allow (e.g., `gmail.com,company.com`). Unmatched sender domains are silently dropped |
+
+## Sentry Integration
+
+| Variable | Description |
+|----------|-------------|
+| `SENTRY_AUTH_TOKEN` | Sentry Organization Auth Token |
+| `SENTRY_ORG` | Sentry organization slug |
+
+## Linear Integration
+
+| Variable | Description |
+|----------|-------------|
+| `LINEAR_DISABLE` | Set to `true` to disable Linear integration |
+| `LINEAR_CLIENT_ID` | OAuth app client ID (create at Linear > Settings > API > Applications) |
+| `LINEAR_CLIENT_SECRET` | OAuth app client secret (shown once on creation) |
+| `LINEAR_REDIRECT_URI` | OAuth callback URL (e.g., `http://localhost:3013/api/trackers/linear/callback`) |
+| `LINEAR_SIGNING_SECRET` | Webhook signing secret from Linear app settings |
+| `LINEAR_ALLOWED_STATES` | CSV of `WorkflowState.type` values that trigger task creation. Default: `unstarted,started,completed,canceled` (i.e. skip Backlog & Triage). Set to empty to lock down everything but the label override. See [Linear integration → State gate](/docs/integrations/linear#state-gate). |
+| `LINEAR_SWARM_READY_LABEL` | Label name (case-insensitive) that bypasses the state gate. Default: `swarm-ready`. |
+
+### Setup Steps
+
+1. Create an OAuth app at Linear > Settings > API > Applications
+2. Set Actor to "Application"
+3. Set Callback URL to your `/api/trackers/linear/callback` endpoint
+4. Enable "Agent session events" in webhook settings
+5. Set Webhook URL to your `/api/trackers/linear/webhook` endpoint
+6. Copy Client ID, Client Secret, and Webhook Signing Secret
+7. Start the server, then visit `/api/trackers/linear/authorize` to complete OAuth
+
+With portless: set `LINEAR_REDIRECT_URI=https://api.swarm.localhost:1355/api/trackers/linear/callback`
+
+## Portless (Local Development)
+
+[Portless](https://port1355.dev/) replaces port-based URLs with friendly domain names for local development.
+
+| Variable | With Portless | Description |
+|----------|---------------|-------------|
+| `MCP_BASE_URL` | `https://api.swarm.localhost:1355` | API server URL |
+| `APP_URL` | `https://ui.swarm.localhost:1355` | Dashboard URL |
+
+Install: `bun add -g portless`. Enable HTTPS: `portless trust && portless proxy start --https`.
+
+## Cloud Personalization & Adaptive Home
+
+Identity envs that brand the swarm and gate cloud-only UX. All are read on every `GET /status` call (cheap — env reads + one SQL aggregate, no upstream calls). See the [Personalization & Status](/docs/guides/personalization) guide for the full story.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SWARM_CLOUD` | `false` | When `true`, marks the deployment as cloud-hosted. Surfaces Docs/Support/Billing items in the user-menu, suppresses the self-host marketing footer, and is sent as `metadata.is_cloud` (always present) on every anonymized telemetry event |
+| `SWARM_ORG_NAME` | `Swarm` | Sidebar header name. Also sent as `metadata.organization_name` on every anonymized telemetry event when set |
+| `SWARM_ORG_ID` | none | Stable org/tenant identifier exposed on `/status` as `identity.org_id` and sent as `metadata.organization_id` on every anonymized telemetry event when set. Set by the orchestrator on cloud deployments |
+| `SWARM_ORG_LOGO_URL` | bundled `/logo.png` | Sidebar logo URL (any HTTPS URL). Falls back to the bundled logo if it fails to load |
+| `SWARM_BRAND_COLOR` | none | Tints the org name in the sidebar header (any CSS color, e.g. `#a855f7`) |
+| `SWARM_MARKETING_URL` | none | Self-host marketing footer link target. Suppressed when `SWARM_CLOUD=true` or `SWARM_HIDE_CLOUD_PROMO=true` |
+| `SWARM_HIDE_CLOUD_PROMO` | `false` | Force-hide the marketing footer regardless of `SWARM_CLOUD` |
+| `SWARM_VERIFY_TTL_MS` | `3600000` (1h) | How long a successful "Test connection" click keeps the harness milestone in `verified` state. In-memory; lost on API restart |
+
+## Agent Filesystem (agent-fs)
+
+| Variable | Description |
+|----------|-------------|
+| `AGENT_FS_API_URL` | Agent-fs API URL. When set as a global swarm config, enables agent-fs integration with persistent shared filesystem |
+| `AGENT_FS_API_KEY` | Per-agent API key, auto-generated on first boot via agent-fs registration. Stored as agent-scoped secret |
+| `AGENT_FS_SHARED_ORG_ID` | Shared org ID for the swarm's agent-fs organization. Auto-created by the lead on first boot |
+
+These are managed as swarm config values (via `set-config` with `scope: "global"`), not environment variables in `.env` files. The entrypoint registers agents with agent-fs on first boot and stores API keys as agent-scoped secrets. The runner propagates `AGENT_FS_SHARED_ORG_ID` to worker processes automatically.
+
+## x402 Payments
+
+Environment variables for the [x402 payment module](/docs/guides/x402-payments), enabling agents to make USDC micropayments on x402-gated APIs.
+
+### Common
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `X402_SIGNER_TYPE` | Auto-detected | Signer backend: `"openfort"` or `"viem"`. Auto-detects based on which credentials are set |
+| `X402_MAX_AUTO_APPROVE` | `1.00` | Maximum USD amount to auto-approve per request |
+| `X402_DAILY_LIMIT` | `10.00` | Daily spending limit in USD |
+| `X402_NETWORK` | `eip155:84532` | CAIP-2 network ID. `eip155:84532` = Base Sepolia (testnet), `eip155:8453` = Base mainnet |
+
+### Openfort Signer
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `OPENFORT_API_KEY` | Yes | Openfort API key (`sk_test_` or `sk_live_` prefixed) |
+| `OPENFORT_WALLET_SECRET` | Yes | P-256 ECDSA key for wallet authentication (base64 encoded) |
+| `OPENFORT_WALLET_ADDRESS` | No | Reuse existing wallet address instead of creating a new one |
+
+### Viem Signer
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `EVM_PRIVATE_KEY` | Yes | Wallet private key (`0x`-prefixed hex). Use a burner wallet with minimal funds |
+
+## Multi-Credential Support
+
+To distribute load across multiple Claude subscriptions, provide multiple credentials as comma-separated values:
+
+```bash
+# Multiple OAuth tokens — one is randomly selected per session
+CLAUDE_CODE_OAUTH_TOKEN=token1,token2,token3
+
+# Also works with API keys
+ANTHROPIC_API_KEY=sk-key1,sk-key2
+```
+
+When a session is spawned, the runner splits the credential value by commas and randomly selects one. Each session gets a single credential, distributing load across subscriptions. A log line indicates which credential index was selected (never the credential itself). Single values (no commas) work unchanged — fully backward compatible.
+
+## Telemetry
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ANONYMIZED_TELEMETRY` | `true` (enabled) | Set to `false` to disable anonymized telemetry. See [Telemetry](/docs/reference/telemetry) for details |
+
+## Business-Use Instrumentation
+
+Optional integration with [`@desplega.ai/business-use`](https://github.com/desplega-ai/business-use) for tracking system invariants across the distributed API + worker architecture.
+
+| Variable | Description |
+|----------|-------------|
+| `BUSINESS_USE_API_KEY` | API key from `uvx business-use-core@latest init` |
+| `BUSINESS_USE_URL` | BU backend URL (default: `http://localhost:13370`) |
+
+SDK enters no-op mode if the API key is missing — safe to omit in environments without a BU backend.
+
+## Secrets Encryption
+
+`swarm_config` rows with `isSecret=1` are encrypted at rest using AES-256-GCM (`v1.67.0+`). The server resolves the encryption key on boot in this order:
+
+1. `SECRETS_ENCRYPTION_KEY` env var (base64-encoded 32 bytes)
+2. `SECRETS_ENCRYPTION_KEY_FILE` pointing at a file containing the base64 key
+3. `<data-dir>/.encryption-key` file on disk
+4. Auto-generated on first boot (only when the DB has no existing encrypted rows)
+
+Generate a key with:
+
+```bash
+openssl rand -base64 32 > ./encryption_key
+chmod 600 ./encryption_key
+```
+
+<Callout type="warn">
+**Back up and preserve the encryption key alongside your SQLite database.** Losing the key means losing all encrypted secrets (API tokens, OAuth creds, etc.) with no recovery path. Do not switch between key sources unless the underlying base64 value is identical.
+</Callout>
+
+**Reserved keys:** `API_KEY` and `SECRETS_ENCRYPTION_KEY` are rejected by the `swarm_config` API (case-insensitive) and must remain environment-only.
+
+**Upgrading from plaintext:** Legacy secrets are auto-migrated on first boot. If `SECRETS_ENCRYPTION_KEY` was not set beforehand, a one-time plaintext backup is created at `<db-path>.backup.secrets-YYYY-MM-DD.env`. Delete this file after verifying your key is backed up.
+
+## Priority
+
+When both CLI flags and environment variables are set:
+
+- CLI flags take precedence over environment variables
+- Inline text (`SYSTEM_PROMPT`) takes precedence over file (`SYSTEM_PROMPT_FILE`)
+
+## Related
+
+- [Harness Configuration](/docs/guides/harness-configuration) — Configure Claude Code or pi-mono provider settings
+- [Deployment Guide](/docs/guides/deployment) — Production deployment with Docker Compose
+- [CLI Reference](/docs/reference/cli) — Terminal commands that complement environment variable configuration
+- [MCP Tools Reference](/docs/reference/mcp-tools) — Tools available to agents at runtime

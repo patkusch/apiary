@@ -1,0 +1,236 @@
+name: Merge Gate
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  detect-changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.check.outputs.code }}
+      ui: ${{ steps.check.outputs.ui }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch base branch
+        run: git fetch origin ${{ github.base_ref }}
+
+      - name: Check for code changes
+        id: check
+        run: |
+          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+          CODE_CHANGED=$(echo "$CHANGED" | grep -v '^docs-site/' | grep -v '^$' || true)
+          if [ -n "$CODE_CHANGED" ]; then
+            echo "code=true" >> $GITHUB_OUTPUT
+            echo "Code files changed:"
+            echo "$CODE_CHANGED"
+          else
+            echo "code=false" >> $GITHUB_OUTPUT
+            echo "No code files changed (only docs-site/)"
+          fi
+          UI_CHANGED=$(echo "$CHANGED" | grep '^ui/' || true)
+          if [ -n "$UI_CHANGED" ]; then
+            echo "ui=true" >> $GITHUB_OUTPUT
+            echo "ui files changed:"
+            echo "$UI_CHANGED"
+          else
+            echo "ui=false" >> $GITHUB_OUTPUT
+          fi
+
+  lint-and-typecheck:
+    name: Lint and Type Check
+    needs: detect-changes
+    if: needs.detect-changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Run Biome linter
+        run: bun run lint
+
+      - name: Run TypeScript type check
+        run: bun run tsc:check
+
+      - name: Check worker/API DB boundary
+        run: bash scripts/check-db-boundary.sh
+
+  test:
+    name: Run Tests
+    needs: detect-changes
+    if: needs.detect-changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Run tests
+        run: bun test
+
+  pi-skills-freshness:
+    name: Pi-Skills Freshness Check
+    needs: detect-changes
+    if: needs.detect-changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Rebuild pi-skills and check for drift
+        run: |
+          bun run build:pi-skills
+          if [ -n "$(git diff --name-only plugin/pi-skills/)" ]; then
+            echo "::error::pi-skills are out of date! Run 'bun run build:pi-skills' and commit the changes."
+            git diff --stat plugin/pi-skills/
+            exit 1
+          fi
+          echo "pi-skills are up to date."
+
+  openapi-freshness:
+    name: OpenAPI Spec Freshness Check
+    needs: detect-changes
+    if: needs.detect-changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Rebuild OpenAPI spec and check for drift
+        run: |
+          bun run docs:openapi
+          if [ -n "$(git diff --name-only openapi.json)" ]; then
+            echo "::error::openapi.json is out of date! Run 'bun run docs:openapi' and commit the changes."
+            git diff --stat openapi.json
+            exit 1
+          fi
+          echo "OpenAPI spec is up to date."
+      - name: Check generated API docs for drift
+        run: |
+          if [ -n "$(git diff --name-only docs-site/content/docs/api-reference/)" ]; then
+            echo "::error::API reference docs are out of date! Run 'bun run docs:openapi' and commit the changes."
+            git diff --stat docs-site/content/docs/api-reference/
+            exit 1
+          fi
+          echo "API reference docs are up to date."
+      - name: Check for raw matchRoute usage
+        run: |
+          UNREGISTERED=$(grep -rn "matchRoute(" src/http/ --include="*.ts" | grep -v "route-def.ts" | grep -v "utils.ts" || true)
+          if [ -n "$UNREGISTERED" ]; then
+            echo "::error::Found raw matchRoute() calls. Convert to route() definitions:"
+            echo "$UNREGISTERED"
+            exit 1
+          fi
+          echo "No raw matchRoute() calls found."
+
+  docker-build:
+    name: Docker Build Test
+    needs: detect-changes
+    if: needs.detect-changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        dockerfile: [Dockerfile, Dockerfile.worker]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./${{ matrix.dockerfile }}
+          push: false
+          tags: test-image:latest
+
+  ui-lint:
+    name: UI Lint and Type Check
+    needs: detect-changes
+    if: needs.detect-changes.outputs.ui == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ui
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install pnpm
+        run: npm install -g pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check design tokens (no raw color literals)
+        run: pnpm run check:tokens
+
+      - name: Run Biome linter
+        run: pnpm lint
+
+      - name: Run TypeScript type check
+        run: pnpm exec tsc -b
+
+  gate:
+    name: Merge Gate
+    needs: [detect-changes, lint-and-typecheck, test, pi-skills-freshness, openapi-freshness, docker-build, ui-lint]
+    if: always()
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check results
+        run: |
+          results='${{ toJSON(needs.*.result) }}'
+          echo "Job results: $results"
+          if echo "$results" | jq -e 'map(select(. != "success" and . != "skipped")) | length > 0' > /dev/null 2>&1; then
+            echo "::error::Some required jobs failed!"
+            exit 1
+          fi
+          echo "All jobs passed or were skipped."

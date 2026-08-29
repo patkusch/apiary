@@ -1,0 +1,80 @@
+# Agent Swarm MCP Server Dockerfile
+# Multi-stage build: compiles to standalone binary for minimal image size
+
+# Stage 1: Build the binary
+FROM oven/bun:latest AS builder
+
+WORKDIR /build
+
+# Copy package files first for better layer caching
+COPY package.json bun.lock* ./
+RUN bun install --frozen-lockfile
+
+# Copy source files
+COPY src/ ./src/
+COPY tsconfig.json ./
+
+# Compile HTTP server to standalone binary
+RUN bun build ./src/http.ts --compile --outfile ./agent-swarm-api
+
+# Stage 2: Minimal runtime image
+FROM debian:bookworm-slim
+
+# Install minimal dependencies (for bun:sqlite and networking).
+# python3 is required by the script-workflow executor's `python` runtime.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    wget \
+    curl \
+    jq \
+    python3 \
+    fuse3 libfuse2 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy the bun CLI from the builder image so the script-workflow executor's
+# `ts` runtime (`bun -e <script>`) works at runtime. The compiled API binary
+# does not include the bun CLI itself.
+COPY --from=builder /usr/local/bin/bun /usr/local/bin/bun
+
+WORKDIR /app
+
+# Copy compiled binary from builder
+COPY --from=builder /build/agent-swarm-api /usr/local/bin/agent-swarm-api
+RUN chmod +x /usr/local/bin/agent-swarm-api
+
+# Copy package.json for version info
+COPY package.json ./
+
+# Copy migration SQL files (compiled binary can't read from /$bunfs virtual filesystem)
+COPY src/be/migrations/*.sql /app/migrations/
+
+# Copy sqlite-vec native extension on real disk. `bun build --compile` embeds JS
+# into /$bunfs/ but not native .so files, and dlopen can't load from /$bunfs/.
+# The glob matches whichever arch-specific sqlite-vec optional dep bun installed
+# for this build (sqlite-vec-linux-x64 or sqlite-vec-linux-arm64).
+COPY --from=builder /build/node_modules/sqlite-vec-linux-*/vec0.so /app/extensions/vec0.so
+
+# Install archil CLI for FUSE/R2-backed disk mounts
+RUN curl https://s3.amazonaws.com/archil-client/install | sh
+
+# Create data directory for SQLite (WAL mode needs .sqlite, .sqlite-wal, .sqlite-shm on same filesystem)
+# Create Archil mount point directories
+RUN mkdir -p /app/data /mnt/data /workspace/shared
+
+ENV PORT=3013
+ENV DATABASE_PATH=/app/data/agent-swarm-db.sqlite
+ENV MIGRATIONS_DIR=/app/migrations
+ENV SQLITE_VEC_EXTENSION_PATH=/app/extensions/vec0.so
+
+VOLUME /app/data
+
+EXPOSE 3013
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD wget -qO- http://localhost:3013/health || exit 1
+
+COPY api-entrypoint.sh /api-entrypoint.sh
+RUN chmod +x /api-entrypoint.sh
+
+ENTRYPOINT ["/api-entrypoint.sh"]
