@@ -35,8 +35,16 @@ beforeAll(async () => {
 
 beforeEach(() => {
   getDb().run("DELETE FROM agent_tasks");
-  agentA = createAgent({ name: `worker-a-${crypto.randomUUID()}`, isLead: false, status: "idle" }).id;
-  agentB = createAgent({ name: `worker-b-${crypto.randomUUID()}`, isLead: false, status: "idle" }).id;
+  agentA = createAgent({
+    name: `worker-a-${crypto.randomUUID()}`,
+    isLead: false,
+    status: "idle",
+  }).id;
+  agentB = createAgent({
+    name: `worker-b-${crypto.randomUUID()}`,
+    isLead: false,
+    status: "idle",
+  }).id;
 });
 
 afterAll(async () => {

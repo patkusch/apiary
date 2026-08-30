@@ -1,0 +1,213 @@
+{
+  "name": "engineering-memories",
+  "description": "Session learnings a coding swarm would plausibly accumulate. Includes deliberate near-miss distractors — documents sharing vocabulary with a query but answering a different question — so the set can distinguish real retrieval from keyword overlap.",
+  "documents": [
+    {
+      "key": "pg-pool-exhaustion",
+      "name": "Postgres connection pool exhaustion under load",
+      "content": "The checkout service stalled under load because every request opened its own Postgres connection and never released it on the error path. The pool was capped at 20 and saturated within seconds. Fix: release the connection in a finally block and set a statement timeout so a hung query cannot hold a slot forever.",
+      "tags": ["postgres", "performance", "incident"]
+    },
+    {
+      "key": "pg-index-missing",
+      "name": "Missing index on orders.customer_id",
+      "content": "A dashboard query was doing a sequential scan over the orders table, taking 8 seconds. Adding a btree index on customer_id brought it to 12ms. Always check EXPLAIN ANALYZE before assuming the ORM is at fault.",
+      "tags": ["postgres", "performance"]
+    },
+    {
+      "key": "sqlite-wal-writer",
+      "name": "SQLite is a single-writer database",
+      "content": "SQLite serialises writes even in WAL mode. Concurrent writers get SQLITE_BUSY unless busy_timeout is set. WAL lets readers proceed during a write, but it does not give you concurrent writers. Plan for a single writer or move to Postgres.",
+      "tags": ["sqlite", "concurrency"]
+    },
+    {
+      "key": "flaky-test-timezone",
+      "name": "Flaky test caused by local timezone",
+      "content": "The billing test passed locally and failed in CI because it constructed dates without a timezone and CI runs in UTC. Fix: freeze the clock and construct all dates explicitly in UTC in tests.",
+      "tags": ["testing", "flaky", "ci"]
+    },
+    {
+      "key": "flaky-test-ordering",
+      "name": "Flaky test caused by shared database state",
+      "content": "Two test files shared a database file and passed alone but failed when run together, because one left rows behind. Fix: truncate tables in beforeEach rather than relying on test ordering.",
+      "tags": ["testing", "flaky"]
+    },
+    {
+      "key": "retry-idempotency",
+      "name": "Retries need idempotency keys",
+      "content": "Retrying a failed payment request double-charged customers because the endpoint was not idempotent. Any at-least-once retry policy requires an idempotency key so the server can recognise and collapse duplicate deliveries.",
+      "tags": ["reliability", "retries", "payments"]
+    },
+    {
+      "key": "lease-expiry-requeue",
+      "name": "Use leases, not liveness guesses, for queued work",
+      "content": "A worker crash left tasks stuck in progress forever. The fix was a lease with an expiry that the worker renews via heartbeat. When the lease lapses the task returns to the queue instead of being failed, and a bounded attempt counter sends genuinely poisonous tasks to a dead-letter queue.",
+      "tags": ["reliability", "queue", "distributed"]
+    },
+    {
+      "key": "docker-layer-cache",
+      "name": "Dockerfile layer ordering wrecked build times",
+      "content": "Copying the whole source tree before running the dependency install invalidated the cache on every commit, so each build reinstalled everything. Copy the lockfile and manifest first, install, then copy source.",
+      "tags": ["docker", "build", "performance"]
+    },
+    {
+      "key": "docker-root-user",
+      "name": "Containers should not run as root",
+      "content": "The worker image ran as root, so anything escaping the process had full control of the container filesystem. Added a non-root user and dropped capabilities in the compose file.",
+      "tags": ["docker", "security"]
+    },
+    {
+      "key": "secrets-in-env",
+      "name": "Raw private keys in environment variables",
+      "content": "Holding a raw wallet private key in an environment variable means any log line, crash dump, or subprocess inheriting the environment can leak it. Secrets that authorise moving money should live in a signer service, not in process env.",
+      "tags": ["security", "secrets"]
+    },
+    {
+      "key": "oauth-token-refresh",
+      "name": "OAuth refresh tokens rotate",
+      "content": "The integration broke after a week because the provider rotates refresh tokens on every use and we kept persisting the original. Always store the newly returned refresh token after each exchange.",
+      "tags": ["oauth", "integration"]
+    },
+    {
+      "key": "webhook-signature",
+      "name": "Verify webhook signatures before parsing",
+      "content": "We parsed webhook JSON before checking the HMAC signature, which let unauthenticated callers reach the parser. Verify the signature against the raw request body first — parsing and re-serialising changes the bytes and breaks verification.",
+      "tags": ["security", "webhooks"]
+    },
+    {
+      "key": "n-plus-one-graphql",
+      "name": "N+1 queries behind a GraphQL resolver",
+      "content": "Each item in a list resolver issued its own query for the author, producing 200 queries per request. Batching with a dataloader collapsed it to two.",
+      "tags": ["graphql", "performance"]
+    },
+    {
+      "key": "vector-brute-force",
+      "name": "Brute-force vector search does not scale",
+      "content": "Similarity search deserialised every stored embedding and computed cosine distance in a loop. Fine at a thousand rows, quadratic pain at a hundred thousand. Move to an approximate nearest-neighbour index once the corpus grows.",
+      "tags": ["search", "embeddings", "performance"]
+    },
+    {
+      "key": "embedding-model-mismatch",
+      "name": "Never mix embedding models in one index",
+      "content": "Half the corpus was embedded with one model and half with another. Cosine similarity between vectors from different models is meaningless, and recall collapsed. Store the model name with each vector and re-embed on change.",
+      "tags": ["search", "embeddings"]
+    },
+    {
+      "key": "god-module-coupling",
+      "name": "The data layer should not call the network",
+      "content": "A database write path fired an HTTP request to a third-party API, which made the persistence layer depend on that service and untestable without mocking it. Emit an in-process event and let integrations subscribe at startup.",
+      "tags": ["architecture", "coupling"]
+    },
+    {
+      "key": "migration-fk-off",
+      "name": "Table rebuilds with foreign keys disabled are risky",
+      "content": "SQLite table rebuilds toggle foreign_keys off, copy rows, and toggle it back. If the process dies mid-rebuild you get orphaned references and no error. Wrap the whole rebuild in a transaction and verify integrity afterwards.",
+      "tags": ["sqlite", "migrations"]
+    },
+    {
+      "key": "log-pii-scrubbing",
+      "name": "Scrub secrets from structured logs",
+      "content": "Request bodies were logged verbatim, so API keys appeared in the log aggregator with a 90-day retention. Added a denylist scrubber that redacts known credential field names before anything is written.",
+      "tags": ["security", "logging"]
+    },
+    {
+      "key": "graceful-shutdown",
+      "name": "Handle SIGTERM to drain work",
+      "content": "Deploys killed workers mid-task because the process ignored SIGTERM. Trap it, stop accepting new work, finish or checkpoint what is in flight, then exit within the orchestrator's grace period.",
+      "tags": ["reliability", "deployment"]
+    },
+    {
+      "key": "cors-preflight",
+      "name": "CORS preflight needs the OPTIONS route",
+      "content": "The browser could not call the API because the OPTIONS preflight returned 404. Register an OPTIONS handler that echoes the allowed methods and headers.",
+      "tags": ["http", "cors"]
+    }
+  ],
+  "queries": [
+    {
+      "id": "q-db-slow-under-load",
+      "query": "the service gets slow and hangs when traffic spikes, database related",
+      "relevant": ["pg-pool-exhaustion"],
+      "rationale": "Pool exhaustion is the load-dependent hang. The missing-index doc is a near miss: also Postgres, also slow, but not load-dependent."
+    },
+    {
+      "id": "q-slow-query",
+      "query": "a single dashboard query takes seconds to return",
+      "relevant": ["pg-index-missing"],
+      "rationale": "Distinguishes a slow individual query from pool saturation."
+    },
+    {
+      "id": "q-concurrent-writes",
+      "query": "can multiple processes write to the database at the same time",
+      "relevant": ["sqlite-wal-writer"]
+    },
+    {
+      "id": "q-test-passes-locally",
+      "query": "test passes on my machine but fails in CI",
+      "relevant": ["flaky-test-timezone", "flaky-test-ordering"],
+      "rationale": "Both flakiness docs are legitimately relevant; a good retriever surfaces either."
+    },
+    {
+      "id": "q-duplicate-charges",
+      "query": "customers were charged twice after we retried a request",
+      "relevant": ["retry-idempotency"]
+    },
+    {
+      "id": "q-worker-crash-stuck-tasks",
+      "query": "tasks stay stuck forever when a worker process dies",
+      "relevant": ["lease-expiry-requeue"]
+    },
+    {
+      "id": "q-slow-builds",
+      "query": "our container builds reinstall dependencies every time",
+      "relevant": ["docker-layer-cache"]
+    },
+    {
+      "id": "q-credential-leak",
+      "query": "how should we store a key that can move money",
+      "relevant": ["secrets-in-env"]
+    },
+    {
+      "id": "q-integration-breaks-weekly",
+      "query": "third party integration stops working after a few days of use",
+      "relevant": ["oauth-token-refresh"]
+    },
+    {
+      "id": "q-untrusted-callers",
+      "query": "anyone can post to our webhook endpoint",
+      "relevant": ["webhook-signature"]
+    },
+    {
+      "id": "q-similarity-search-slow",
+      "query": "semantic search got slow as the corpus grew",
+      "relevant": ["vector-brute-force"],
+      "rationale": "The embedding-model-mismatch doc shares vocabulary but describes a correctness failure, not a scaling one."
+    },
+    {
+      "id": "q-recall-dropped",
+      "query": "search results became irrelevant after we changed the embedding model",
+      "relevant": ["embedding-model-mismatch"]
+    },
+    {
+      "id": "q-layering",
+      "query": "should database code call external APIs directly",
+      "relevant": ["god-module-coupling"]
+    },
+    {
+      "id": "q-deploy-kills-work",
+      "query": "deploying restarts workers and loses whatever they were doing",
+      "relevant": ["graceful-shutdown"],
+      "rationale": "Near miss with the lease doc, which covers unplanned crashes rather than planned shutdown."
+    },
+    {
+      "id": "q-browser-cannot-call-api",
+      "query": "frontend requests to the api fail before the request is even sent",
+      "relevant": ["cors-preflight"]
+    },
+    {
+      "id": "q-keys-in-logs",
+      "query": "we found api keys in our log aggregator",
+      "relevant": ["log-pii-scrubbing"]
+    }
+  ]
+}

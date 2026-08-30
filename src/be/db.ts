@@ -1,7 +1,6 @@
 import { Database } from "bun:sqlite";
 import { parseProviderMeta } from "@/utils/provider-metadata.ts";
 import pkg from "../../package.json";
-import { emitTaskStarted } from "./task-hooks.ts";
 import { configureDbResolver } from "../prompts/resolver";
 import type {
   ActiveSession,
@@ -82,6 +81,7 @@ import { normalizeDate, normalizeDateRequired } from "./date-utils";
 import { runMigrations } from "./migrations/runner";
 import { seedDefaultTemplates } from "./seed";
 import { isReservedConfigKey, reservedKeyError } from "./swarm-config-guard";
+import { emitTaskStarted } from "./task-hooks.ts";
 
 let db: Database | null = null;
 let sqliteVecAvailable = false;
@@ -2425,9 +2425,7 @@ export const DEFAULT_MAX_TASK_ATTEMPTS = 3;
  * How long a claim is valid without renewal. Must comfortably exceed the worker
  * session heartbeat interval so a healthy-but-busy worker is never reaped.
  */
-export const TASK_LEASE_DURATION_MS = Number(
-  process.env.TASK_LEASE_DURATION_MS ?? 10 * 60 * 1000,
-);
+export const TASK_LEASE_DURATION_MS = Number(process.env.TASK_LEASE_DURATION_MS ?? 10 * 60 * 1000);
 
 function computeLeaseExpiry(fromMs: number = Date.now()): string {
   return new Date(fromMs + TASK_LEASE_DURATION_MS).toISOString();

@@ -242,6 +242,24 @@ const COMMAND_HELP: Record<
     ].join("\n"),
     examples: [`  ${binName} docs`, `  ${binName} docs --open`].join("\n"),
   },
+  eval: {
+    usage: `${binName} eval [options]`,
+    description:
+      "Measure memory retrieval quality against a golden set.\nRuns against a throwaway database, so it never touches a live swarm's memories.",
+    options: [
+      "  -s, --set <path>       Golden set JSON (default: built-in engineering-memories)",
+      "  -p, --provider <name>  Embeddings: 'hash' (offline, default) or 'openai'",
+      "      --json             Emit the full report as JSON",
+      "      --min-hit-at K=F   Exit non-zero if hit@K falls below fraction F",
+      "  -h, --help             Show this help",
+    ].join("\n"),
+    examples: [
+      `  ${binName} eval`,
+      `  ${binName} eval --provider openai`,
+      `  ${binName} eval --min-hit-at 3=0.8`,
+      `  ${binName} eval --set ./my-golden-set.json --json`,
+    ].join("\n"),
+  },
   hook: {
     usage: `${binName} hook`,
     description:
@@ -314,6 +332,7 @@ function printHelp(command?: string) {
     ["hook", "Handle Claude Code hook events (stdin)"],
     ["artifact", "Manage agent artifacts"],
     ["docs", "Open documentation (--open to launch in browser)"],
+    ["eval", "Measure memory retrieval quality against a golden set"],
     ["codex-login", "Authenticate Codex via ChatGPT OAuth"],
     ["claude-managed-setup", "Bootstrap Anthropic Managed Agents (agent + env + skills)"],
     ["version", "Show version number"],
@@ -557,6 +576,12 @@ if (args.showHelp || args.command === "help" || args.command === undefined) {
     });
   }
   process.exit(0);
+} else if (args.command === "eval") {
+  // API-side module, dynamically imported so the CLI itself stays free of DB
+  // imports — same pattern the `api` command uses for ./http.ts.
+  const { runEvalCommand } = await import("./eval/command.ts");
+  const evalArgs = process.argv.slice(process.argv.indexOf("eval") + 1);
+  await runEvalCommand(evalArgs);
 } else if (args.command === "hook") {
   runHook();
 } else if (args.command === "artifact") {
