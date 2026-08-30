@@ -38,7 +38,7 @@ No `lint` script in this workspace. Root Biome linting does not cover `docs-site
   ```mdx
   import { Tab, Tabs } from "fumadocs-ui/components/tabs";
   ```
-  If you use a component without importing it, the MDX still compiles but the component renders as a plain HTML tag — silent failure. Reference files: `guides/harness-providers.mdx`, `guides/x402-payments.mdx`.
+  If you use a component without importing it, the MDX still compiles but the component renders as a plain HTML tag — silent failure. Reference files: `guides/harness-providers.mdx`.
 - **Page ordering:** add new pages to the sibling `meta.json` `pages` array. Files not listed still render but won't appear in the sidebar at the intended position.
 - **Verify before pushing:** run `pnpm build`. A failed import, missing component, or malformed frontmatter only surfaces at build time — and will fail the Vercel deploy if pushed unverified.
 
