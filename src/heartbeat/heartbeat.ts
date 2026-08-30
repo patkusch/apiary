@@ -202,8 +202,13 @@ function reclaimStalledTask(
       `${task.id.slice(0, 8)} (attempt ${result.attempts}/${result.maxAttempts}) — ${cause}`,
   );
 
+  // The ex-owner is NOT idle — we just proved its worker process is gone. Marking
+  // it idle would make it eligible for auto-assignment later in this same sweep,
+  // handing the task straight back to a corpse and burning an attempt every sweep
+  // until a perfectly healthy task got dead-lettered. 'offline' takes it out of
+  // the scheduling pool; the worker clears it by re-registering when it returns.
   if (task.agentId && getActiveTaskCount(task.agentId) === 0) {
-    updateAgentStatus(task.agentId, "idle");
+    updateAgentStatus(task.agentId, "offline");
   }
 }
 

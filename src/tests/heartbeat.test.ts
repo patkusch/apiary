@@ -5,6 +5,7 @@ import {
   createAgent,
   createTaskExtended,
   getActiveSessionForTask,
+  getAgentById,
   getDb,
   getIdleWorkersWithCapacity,
   getStalledInProgressTasks,
@@ -224,13 +225,15 @@ describe("Heartbeat Triage", () => {
       expect(findings.reclaimedTasks[0]!.outcome).toBe("requeued");
       expect(findings.stalledTasks.length).toBe(0);
 
-      // A dead worker is a scheduling event, not a task failure. The work goes
-      // back in the pool; the same sweep may immediately hand it to an available
-      // worker, so the task is runnable again either way — never discarded.
+      // A dead worker is a scheduling event, not a task failure: the work goes
+      // back in the pool for another worker instead of being discarded.
       const updated = getTaskById(task.id);
-      expect(updated?.status).not.toBe("failed");
-      expect(updated?.status).not.toBe("dead_letter");
-      expect(["unassigned", "in_progress"]).toContain(updated!.status);
+      expect(updated?.status).toBe("unassigned");
+      expect(updated?.agentId).toBeNull();
+
+      // And the dead worker is taken out of the scheduling pool, so the task
+      // cannot be handed straight back to it.
+      expect(getAgentById(agent.id)?.status).toBe("offline");
     });
 
     test("requeues stalled task with stale session heartbeat", async () => {
@@ -261,9 +264,9 @@ describe("Heartbeat Triage", () => {
 
       // Task is requeued (not failed) and the dead session is cleaned up.
       const updated = getTaskById(task.id);
-      expect(updated?.status).not.toBe("failed");
-      expect(updated?.status).not.toBe("dead_letter");
-      expect(["unassigned", "in_progress"]).toContain(updated!.status);
+      expect(updated?.status).toBe("unassigned");
+      expect(updated?.agentId).toBeNull();
+      expect(getAgentById(agent.id)?.status).toBe("offline");
 
       const session = getActiveSessionForTask(task.id);
       expect(session).toBeNull();
@@ -367,7 +370,7 @@ describe("Heartbeat Triage", () => {
       expect(findings.stalledTasks.length).toBe(0);
     });
 
-    test("sets agent to idle after auto-failing its only task", async () => {
+    test("takes a dead worker offline after reclaiming its only task", async () => {
       const agent = createAgent({ name: "dead-worker", isLead: false, status: "busy" });
       const task = createTaskExtended("Stalled task", { agentId: agent.id });
       startTask(task.id);
@@ -377,11 +380,12 @@ describe("Heartbeat Triage", () => {
 
       await codeLevelTriage();
 
-      // Agent should be set to idle since it has no more active tasks
+      // Not idle: we just proved this worker's process is gone, so it must not be
+      // eligible for auto-assignment. It clears 'offline' by re-registering.
       const agents = getDb().query("SELECT status FROM agents WHERE id = ?").get(agent.id) as {
         status: string;
       };
-      expect(agents.status).toBe("idle");
+      expect(agents.status).toBe("offline");
     });
   });
 
@@ -420,11 +424,31 @@ describe("Heartbeat Triage", () => {
 
       await runHeartbeatSweep();
 
-      // Requeued rather than failed. The sweep's auto-assign step may hand it
-      // straight back out, which is the desired outcome: the work continues.
+      // Requeued rather than failed, and NOT auto-assigned back to the worker
+      // we just established is dead.
       const updated = getTaskById(task.id);
-      expect(updated?.status).not.toBe("failed");
-      expect(["unassigned", "in_progress"]).toContain(updated!.status);
+      expect(updated?.status).toBe("unassigned");
+      expect(updated?.agentId).toBeNull();
+      expect(getAgentById(worker.id)?.status).toBe("offline");
+    });
+
+    test("a reclaimed task is handed to a live worker, not the dead one", async () => {
+      const dead = createAgent({ name: "dead-worker-2", isLead: false, status: "busy" });
+      const alive = createAgent({ name: "live-worker", isLead: false, status: "idle" });
+      const task = createTaskExtended("Work that must survive", { agentId: dead.id });
+      startTask(task.id);
+
+      const oldTime = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+      getDb().run("UPDATE agent_tasks SET lastUpdatedAt = ? WHERE id = ?", [oldTime, task.id]);
+
+      await runHeartbeatSweep();
+
+      // The sweep reclaims from the dead worker and auto-assigns to the live one
+      // in the same pass, so the work keeps moving without a wasted attempt.
+      const updated = getTaskById(task.id);
+      expect(updated?.status).toBe("in_progress");
+      expect(updated?.agentId).toBe(alive.id);
+      expect(getAgentById(dead.id)?.status).toBe("offline");
     });
 
     test("cleans stale sessions even when preflight gate bails", async () => {
