@@ -7,7 +7,7 @@
 
 <p align="center">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="MIT License"></a>
-  <img src="https://img.shields.io/badge/tests-3753%20passing-brightgreen?style=flat-square" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-3739%20passing-brightgreen?style=flat-square" alt="Tests">
   <img src="https://img.shields.io/badge/runtime-bun-black?style=flat-square" alt="Bun">
 </p>
 
@@ -76,35 +76,79 @@ and no task-success metric anywhere in the project — 219 test files, none of
 which measure whether memory helps. The central value proposition ships
 unfalsifiable.
 
-Making that measurable is the main roadmap item for this fork (see below). If
-compounding memory works, it should be possible to show it.
+`apiary eval` fixes that: it scores retrieval against a labelled golden set and
+prints hit@k, recall@k, precision@k, nDCG@k and MRR (see below). Retrieval
+quality is now a number that moves when the code changes, and a CI gate can
+refuse a regression. Whether memory improves *task outcomes* is a further step,
+and is still open.
 
 ## Status
 
-**v0.1.0** — the durability and layering work is done and covered by tests. The
-full inherited suite passes: **3753 tests, 0 failures**.
+**v0.1.0** — durability, layering, scope reduction and the eval harness are done
+and covered by tests. Full suite: **3739 tests, 0 failures**.
 
 | Area | State |
 |---|---|
 | Task leases, retries, dead-letter queue | ✅ Done, tested |
 | Network I/O out of the persistence layer | ✅ Done |
-| Renamed / rescoped from agent-swarm | ✅ Done |
-| Memory eval harness (`apiary eval`) | ⬜ Next |
-| Strip crypto-wallet scope (`src/x402`) | ⬜ Next |
+| Reclaimed tasks no longer returned to dead workers | ✅ Done, tested |
+| Crypto-wallet scope removed (`src/x402`) | ✅ Done |
+| Memory eval harness (`apiary eval`) | ✅ Done, tested |
+| End-to-end memory ablation (task success with memory on/off) | ⬜ Next |
 | Break up the 9.4k-line `db.ts` into repositories | ⬜ Planned |
 
-### Planned: `apiary eval`
+### `apiary eval`
 
-A golden retrieval set with hit@k / MRR, plus an A/B ablation runner that runs a
-task suite with memory on versus off and reports the delta. This is the feature
-that would turn "agents get better over time" from a claim into a number.
+```bash
+bun src/cli.tsx eval
+```
 
-### Planned: dropping the wallet
+Seeds a golden corpus into the real memory store, runs each labelled query
+through the same retrieval path the agents use, and scores the ranking:
 
-Upstream ships `src/x402/`, which takes a raw `EVM_PRIVATE_KEY` from the
+```
+  Golden set    engineering-memories
+  Embeddings    hash-bow-v1 (512d)
+  Corpus        20 documents, 16 queries
+
+  k      hit@k    recall@k  prec@k   nDCG@k
+  ----   ------   --------  ------   ------
+  1       31.3%      28.1%   31.3%    31.3%
+  3       75.0%      75.0%   27.1%    57.2%
+  5       81.3%      81.3%   17.5%    59.6%
+  10      87.5%      87.5%    9.4%    61.7%
+
+  MRR           0.532
+```
+
+It runs against a throwaway database, so it can never read or pollute a live
+swarm's memories, and misses are printed with the documents that were expected
+so a regression is diagnosable rather than just a lower number.
+
+The default embedding provider is a deterministic hashed bag-of-words
+projection. That is a deliberate trade: the production embedder calls the OpenAI
+API, which needs a key, costs money per run, and drifts when the upstream model
+changes — an eval you cannot run on every commit is an eval nobody runs. It sees
+lexical overlap only, so **treat its scores as a floor, not as production
+quality**; `--provider openai` gives real numbers. Both current misses on the
+built-in set are queries that need synonymy the lexical provider cannot see.
+
+| Flag | Meaning |
+|---|---|
+| `--set <path>` | Use your own golden set JSON |
+| `--provider hash\|openai` | Embeddings (default `hash`, offline) |
+| `--json` | Emit the full report for CI |
+| `--min-hit-at K=F` | Exit non-zero if hit@K drops below fraction F |
+
+Still missing, and the honest gap: this measures *retrieval*, not whether
+memory makes agents finish tasks better. End-to-end ablation is the next step.
+
+### Removed: the wallet
+
+Upstream shipped `src/x402/`, which read a raw `EVM_PRIVATE_KEY` from the
 environment to make crypto payments. A tool that holds repository write access
-should not also hold a hot wallet key. That module is slated for removal, along
-with the Openfort and viem dependencies.
+and executes agent-authored code should not also hold a hot wallet key. The
+module is gone, along with the `@x402/*`, Openfort and viem dependencies.
 
 ## Quick start
 
