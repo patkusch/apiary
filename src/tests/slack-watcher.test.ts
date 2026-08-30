@@ -345,6 +345,13 @@ const mockChatPostMessage = mock(() => Promise.resolve({ ok: true, ts: "mock.dm.
 const mockSetStatus = mock(() => Promise.resolve({ ok: true }));
 
 mock.module("../slack/app", () => ({
+  // src/slack/index.ts re-exports all four of these. bun's mock.module is
+  // process-wide, so a partial mock here makes that re-export fail with
+  // "export 'initSlackApp' not found in './app'" in any test file that happens
+  // to be evaluated after this one -- order-dependent, and it bit CI.
+  initSlackApp: async () => null,
+  startSlackApp: async () => {},
+  stopSlackApp: async () => {},
   getSlackApp: () => ({
     client: {
       chat: {
