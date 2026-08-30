@@ -70,3 +70,9 @@ docker-compose.desplega.yaml
 
 # Opencode artifacts
 .opencode/
+
+# Test reports
+junit.xml
+
+# apiary eval throwaway databases
+.apiary-eval-*.sqlite*

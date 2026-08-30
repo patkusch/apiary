@@ -6,6 +6,9 @@ on:
       - main
     paths-ignore:
       - "docs-site/**"
+  pull_request:
+    paths-ignore:
+      - "docs-site/**"
   workflow_dispatch:
 
 jobs:
@@ -31,6 +34,9 @@ jobs:
       - name: Run TypeScript type check
         run: bun run tsc:check
 
+      - name: Check Worker/API DB boundary
+        run: bash scripts/check-db-boundary.sh
+
   test:
     name: Run Tests
     runs-on: ubuntu-latest
@@ -47,5 +53,40 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      # A bare `bun test` prints failures to stderr, which the Actions log
+      # interleaves so badly that a red run does not tell you which test broke.
+      # The JUnit report is uploaded regardless of outcome so failures are
+      # diagnosable from the run page rather than by guessing.
       - name: Run tests
-        run: bun test
+        run: bun test --reporter=junit --reporter-outfile=./junit.xml
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-report
+          path: junit.xml
+          if-no-files-found: warn
+
+  memory-eval:
+    name: Memory Retrieval Eval
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # Uses the offline hash embedding provider, so this needs no API key and
+      # costs nothing. The threshold is a regression floor well under the ~87%
+      # currently reached, not a target: it should trip on a real retrieval
+      # break, not on scoring noise.
+      - name: Score memory retrieval
+        run: bun src/cli.tsx eval --min-hit-at 10=0.75

@@ -115,7 +115,6 @@ class OpencodeSession implements ProviderSession {
   // leaving agent_tasks.provider/.model NULL. Buffer + flush on first attach.
   private pendingEvents: ProviderEvent[] = [];
   private completionResolve!: (result: ProviderResult) => void;
-  private completionReject!: (err: Error) => void;
   private completionPromise: Promise<ProviderResult>;
   private server: { url: string; close(): void };
   private aborted = false;
@@ -159,9 +158,10 @@ class OpencodeSession implements ProviderSession {
     this.agentFilePath = agentFilePath;
     this.configFilePath = configFilePath;
     this.dataHomePath = dataHomePath;
-    this.completionPromise = new Promise<ProviderResult>((resolve, reject) => {
+    // Only the resolve side is used: failures surface as a ProviderResult with
+    // an error, never as a rejected promise.
+    this.completionPromise = new Promise<ProviderResult>((resolve) => {
       this.completionResolve = resolve;
-      this.completionReject = reject;
     });
   }
 

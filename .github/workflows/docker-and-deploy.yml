@@ -1,23 +1,17 @@
 name: Docker Build + Publish + Deploy
 
+# Inherited from upstream (desplega-ai/agent-swarm) as their release pipeline.
+#
+# Automatic triggers are deliberately disabled on this fork. Left on `push`, it
+# published container images to ghcr.io under this account, attempted `npm
+# publish` of the renamed package, created git tags and GitHub releases, and
+# queued a `self-hosted` job forever because this fork has no self-hosted
+# runner. None of that should happen automatically on a fork that does not own
+# the upstream infrastructure or the npm name.
+#
+# Kept rather than deleted so it can be re-enabled once this fork has its own
+# registry, runner and deploy target. Run it manually if you need it.
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - "src/**"
-      - "Dockerfile"
-      - "Dockerfile.worker"
-      - "docker-entrypoint.sh"
-      - "api-entrypoint.sh"
-      - "package.json"
-      - "bun.lock*"
-      - "tsconfig.json"
-      - "scripts/**"
-      - "templates/**"
-      - "plugin/**"
-      - "deploy/**"
-      - ".github/workflows/docker-and-deploy.yml"
   workflow_dispatch:
 
 concurrency:
