@@ -17,98 +17,154 @@
 
 apiary is a hard fork of [`desplega-ai/agent-swarm`](https://github.com/desplega-ai/agent-swarm)
 (MIT), by way of [`jamalavedra/agent-swarm`](https://github.com/jamalavedra/agent-swarm).
-It keeps the parts of that project that are genuinely good — the lead/worker model,
-the priority pool, budget admission control, encrypted secrets, workflows — and
-changes the parts that are not.
+It keeps the lead/worker model, the priority pool, budget admission control,
+encrypted secrets and workflows, and changes how task durability works.
 
-It is a fork, not a rewrite. Upstream did the hard work of building the surface
-area; this fork is opinionated about correctness and scope.
+## The failure mode this exists to solve
 
-## Why fork
+A worker picks up a task. Halfway through, its process dies, or you deploy and
+the server restarts.
 
-Three things motivated it.
-
-### 1. A crashed worker destroyed its task
-
-Upstream had no lease on a claimed task. When a worker's heartbeat went stale,
-the heartbeat sweep called `failTask()` and the in-flight work was gone. There
-was no attempt counter and no requeue path, so a crash — or an ordinary deploy
-restart — silently discarded work. Upstream's own heartbeat prompt told the lead
-agent to go clean up after it:
+Upstream marked that task `failed` and moved on. There was no lease, no attempt
+counter and no requeue path, so the in-flight work was gone and nothing retried
+it. Upstream's own heartbeat prompt told the lead agent to go clean up after it:
 
 > Failures with reason "worker session not found" or "worker session heartbeat is
 > stale" indicate tasks that were INTERRUPTED by a server restart. These are NOT
 > "expected auto-cleanup" — they represent work that was lost mid-execution.
 
-That is a missing state machine papered over with an LLM prompt. apiary replaces
-it with an explicit lease:
+That is a missing state machine described to a language model in prose. apiary
+replaces it with a lease.
 
-- `claimTask()` takes a lease and increments an attempt counter.
-- The worker's session heartbeat renews the lease, guarded on lease ownership so
-  a reaped worker can't resurrect a claim that has moved on.
-- A lapsed lease means *nobody is working on this*, which is a scheduling fact,
-  not a task failure. The task goes back to `unassigned` for another worker.
-- Only once the retry budget is spent does the task move to a new terminal
-  status, `dead_letter`, so a poison task can't spin forever and a transient
-  crash can't lose work.
-
-At-most-once became at-least-once with a bounded retry budget. See
-[`src/tests/task-leases.test.ts`](src/tests/task-leases.test.ts), which kills a
-worker mid-task and proves the work survives.
-
-### 2. The persistence layer called the network
-
-`db.ts` imported `../github/task-reactions`, so `claimTask()` — a SQLite write
-path — fired an HTTP request to GitHub. The data layer depended on GitHub and
-Slack and could not be exercised without mocking the internet.
-
-Task lifecycle notifications now go through an in-process hook registry
-([`src/be/task-hooks.ts`](src/be/task-hooks.ts)) that integrations subscribe to at
-startup ([`src/be/wiring.ts`](src/be/wiring.ts)). Behaviour is unchanged; the
-coupling is gone. A listener that throws can no longer affect the database write
-that triggered it.
-
-### 3. The headline claim was never measured
-
-Upstream's pitch is that agents "remember everything, learn from every mistake,
-and get better with every task." There is no retrieval benchmark, no ablation,
-and no task-success metric anywhere in the project — 219 test files, none of
-which measure whether memory helps. The central value proposition ships
-unfalsifiable.
-
-`apiary eval` fixes that: it scores retrieval against a labelled golden set and
-prints hit@k, recall@k, precision@k, nDCG@k and MRR (see below). Retrieval
-quality is now a number that moves when the code changes, and a CI gate can
-refuse a regression. Whether memory improves *task outcomes* is a further step,
-and is still open.
-
-## Status
-
-**v0.1.0** — durability, layering, scope reduction and the eval harness are done
-and covered by tests. Full suite: **3751 tests, 0 failures**.
-
-| Area | State |
-|---|---|
-| Task leases, retries, dead-letter queue | ✅ Done, tested |
-| Network I/O out of the persistence layer | ✅ Done |
-| Reclaimed tasks no longer returned to dead workers | ✅ Done, tested |
-| Crypto-wallet scope removed (`src/x402`) | ✅ Done |
-| Memory eval harness (`apiary eval`) | ✅ Done, tested |
-| `dead_letter` treated as terminal everywhere | ✅ Done, tested |
-| Server restart reclaims leases instead of cloning tasks | ✅ Done, tested |
-| Fencing token so a reclaimed worker cannot still write | ⬜ Open, see Known limitations |
-| Leases on the direct-assign path (`startTask`/`resumeTask`) | ✅ Done, tested |
-| End-to-end memory ablation (task success with memory on/off) | ⬜ Next |
-| Break up the 9.4k-line `db.ts` into repositories | ⬜ Planned |
-
-### `apiary eval`
+## See it happen
 
 ```bash
-bun run eval
+bun run demo
 ```
 
-Seeds a golden corpus into the real memory store, runs each labelled query
-through the same retrieval path the agents use, and scores the ranking:
+Real output, captured from that command. Every line is a SQLite write against a
+throwaway database, nothing is mocked:
+
+```
+apiary durability demo  lease=600s  budget=3 attempts
+workers: alice=e0eedd09  bob=f4637a7b
+
+1. A task is leased, and a second worker cannot take it
+──────────────────────────────────────────────────────────────────────────
+20:17:03.166  · task created a135eb44
+20:17:03.166  ✓ alice claimed it, lease held for 600s
+            after alice claims     status=in_progress  attempts=1/3  owner=e0eedd09  lease_expires=20:27:03
+20:17:03.166  ✓ bob tried to claim the same task and was refused
+
+2. A working worker keeps its task by renewing
+──────────────────────────────────────────────────────────────────────────
+20:17:03.166  · lease has aged past its expiry
+20:17:03.166  ✓ alice renewed the lease, she is still alive
+20:17:03.166  ✓ reaper ran and reclaimed 0 task(s), alice keeps her work
+            after renewal          status=in_progress  attempts=1/3  owner=e0eedd09  lease_expires=20:27:03
+
+3. A worker dies mid-task and the work survives
+──────────────────────────────────────────────────────────────────────────
+20:17:03.166  ✗ alice's process dies, holding the task, renewing nothing
+            lease lapsed           status=in_progress  attempts=1/3  owner=e0eedd09  lease_expires=20:07:03
+20:17:03.166  ✓ reaper requeued the task (outcome=requeued), it is not marked failed
+            after reclaim          status=unassigned   attempts=1/3  owner=—  lease_expires=—
+20:17:03.166  ✓ bob picked up the same task a135eb44, attempt 2
+            after bob claims       status=in_progress  attempts=2/3  owner=f4637a7b  lease_expires=20:27:03
+20:17:03.167  ✓ bob finished it: status=completed. No work was lost.
+
+4. A task that keeps killing its worker terminates
+──────────────────────────────────────────────────────────────────────────
+20:17:03.169  · task created 3bababf1
+20:17:03.171  · attempt 1/3 died → requeued
+20:17:03.172  · attempt 2/3 died → requeued
+20:17:03.172  ■ attempt 3/3 died → dead_lettered
+            final                  status=dead_letter  attempts=3/3  owner=—  lease_expires=—
+20:17:03.172  ✓ the retry budget is spent, so it stopped rather than looping forever
+20:17:03.172  ✓ a dead-lettered task cannot be claimed again without an explicit requeue
+
+──────────────────────────────────────────────────────────────────────────
+Done. Nothing above is mocked. Every line is a real SQLite write.
+```
+
+## Lease lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> unassigned: task created
+    unassigned --> in_progress: claimTask()<br/>lease taken, attempts + 1
+    in_progress --> in_progress: renewTaskLease()<br/>worker still alive
+    in_progress --> unassigned: lease expired<br/>attempts &lt; maxAttempts
+    in_progress --> dead_letter: lease expired<br/>attempts = maxAttempts
+    in_progress --> completed: completeTask()
+    dead_letter --> unassigned: requeueDeadLetterTask()<br/>deliberate, fresh budget
+    completed --> [*]
+```
+
+The rules behind it:
+
+- A claim takes a lease and spends one attempt. Both `claimTask` (pool) and
+  `startTask` (assigned directly to an agent) do this.
+- The worker renews the lease while it works. Renewal is guarded on lease
+  ownership, so a worker that was already reaped cannot reclaim a task that has
+  moved on.
+- A lapsed lease means nobody is working on the task. That is a scheduling fact,
+  not a failure, so the task returns to the pool rather than being marked failed.
+- Only when the retry budget is spent does the task reach `dead_letter`, which is
+  terminal. Progress writes, restarts and completions are all refused there.
+  `requeueDeadLetterTask()` is the single way back, because crossing the bound
+  should take a decision.
+- A server restart reclaims leases the same way. The task keeps its id and its
+  attempt count, so restarting does not reset the budget.
+
+Pausing and resuming re-leases without spending an attempt: a graceful shutdown
+is a continuation of the same attempt, not a new one.
+
+## Quick start
+
+Verified from a clean clone on Bun 1.4.0.
+
+```bash
+bun install
+```
+
+```bash
+bun test
+```
+
+```bash
+bun run demo
+```
+
+```bash
+bun run start:http
+```
+
+The API listens on port `3013`, with interactive docs at `http://localhost:3013/docs`.
+
+Configuration, deployment and integration setup are inherited from upstream and
+documented in [DEPLOYMENT.md](./DEPLOYMENT.md) and [LOCAL_TESTING.md](./LOCAL_TESTING.md).
+Upstream's docs at [docs.agent-swarm.dev](https://docs.agent-swarm.dev) still
+apply to everything this fork has not changed.
+
+### Lease configuration
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `TASK_LEASE_DURATION_MS` | `600000` (10 min) | How long a claim is valid without renewal. Must comfortably exceed the worker session heartbeat interval. |
+| `HEARTBEAT_INTERVAL_MS` | `90000` (90s) | How often the reaper runs. |
+| `HEARTBEAT_DISABLE` | unset | Set to `true` to stop the reaper. Nothing will reclaim lapsed leases. |
+
+Retry budget is per task via `maxAttempts`, default `3`.
+
+## Measuring the memory claim
+
+Upstream's pitch is that agents "remember everything, learn from every mistake,
+and get better with every task". Nothing in the project measured it: 219 test
+files, none scoring retrieval.
+
+`bun run eval` scores retrieval against a labelled golden set with deliberate
+near-miss distractors, so it can tell real retrieval from keyword overlap:
 
 ```
   Golden set    engineering-memories
@@ -125,106 +181,71 @@ through the same retrieval path the agents use, and scores the ranking:
   MRR           0.532
 ```
 
-It runs against a throwaway database, so it can never read or pollute a live
-swarm's memories, and misses are printed with the documents that were expected
-so a regression is diagnosable rather than just a lower number.
-
-The default embedding provider is a deterministic hashed bag-of-words
-projection. That is a deliberate trade: the production embedder calls the OpenAI
-API, which needs a key, costs money per run, and drifts when the upstream model
-changes — an eval you cannot run on every commit is an eval nobody runs. It sees
-lexical overlap only, so **treat its scores as a floor, not as production
-quality**; `--provider openai` gives real numbers. Both current misses on the
-built-in set are queries that need synonymy the lexical provider cannot see.
+The default embedding provider is a deterministic hashed bag of words. The
+production embedder calls the OpenAI API, which needs a key, costs money per run
+and drifts when the upstream model changes, and an eval you cannot run on every
+commit is an eval nobody runs. It sees lexical overlap only, so treat these
+numbers as a floor rather than as production quality. `--provider openai` gives
+real numbers. `--min-hit-at 3=0.6` gates CI.
 
 | Flag | Meaning |
 |---|---|
 | `--set <path>` | Use your own golden set JSON |
-| `--provider hash\|openai` | Embeddings (default `hash`, offline) |
+| `--provider hash\|openai` | Embeddings, default `hash`, offline |
 | `--json` | Emit the full report for CI |
 | `--min-hit-at K=F` | Exit non-zero if hit@K drops below fraction F |
 
-Still missing, and the honest gap: this measures *retrieval*, not whether
-memory makes agents finish tasks better. End-to-end ablation is the next step.
+## What diverged from upstream
 
-### Removed: the wallet
+51 of 1553 tracked files, +2038 / −2901. Everything else is upstream's.
 
-Upstream shipped `src/x402/`, which read a raw `EVM_PRIVATE_KEY` from the
-environment to make crypto payments. A tool that holds repository write access
-and executes agent-authored code should not also hold a hot wallet key. The
-module is gone, along with the `@x402/*`, Openfort and viem dependencies.
-
-## Quick start
-
-**Prerequisites:** [Bun](https://bun.sh) ≥ 1.0.26, and a Claude Code OAuth token
-(`claude setup-token`). Docker is needed only for containerised workers.
-
-```bash
-bun install
-```
-
-```bash
-bun test
-```
-
-```bash
-bun run start:http
-```
-
-The API listens on port `3013`, with interactive docs at `http://localhost:3013/docs`.
-
-Configuration, deployment, and integration setup are inherited from upstream and
-documented in [DEPLOYMENT.md](./DEPLOYMENT.md) and [LOCAL_TESTING.md](./LOCAL_TESTING.md).
-Upstream's docs at [docs.agent-swarm.dev](https://docs.agent-swarm.dev) still
-apply to everything this fork has not changed.
-
-## Lease configuration
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `TASK_LEASE_DURATION_MS` | `600000` (10 min) | How long a claim is valid without renewal. Must comfortably exceed the worker session heartbeat interval. |
-
-Retry budget is per-task via `maxAttempts` (default `3`). Dead-lettered tasks are
-listed by `getDeadLetterTasks()` and can be returned to the pool with a fresh
-budget via `requeueDeadLetterTask()`.
+| Change | Why |
+|---|---|
+| Task leases, attempt counting, `dead_letter` | Worker death lost in-flight work |
+| Restart reclaims instead of cloning the task | Cloning reset the retry budget and dropped Slack and VCS metadata |
+| Dead workers marked offline, not idle | The scheduler handed tasks straight back to a dead process |
+| Network I/O out of the persistence layer | `claimTask` fired an HTTP request to GitHub from a SQLite write path |
+| `src/x402` removed | A tool with repo write access should not also hold a hot wallet key |
+| `apiary eval` | The memory claim was unfalsifiable as shipped |
 
 ## Known limitations
 
-Each of these has been confirmed in the code or by running it. Nothing here is
-speculative.
+Confirmed in the code or by running it. Nothing here is speculative.
 
-**Leases have no fencing token.** Renewal is driven by the `PostToolUse` hook, so
-the cadence is however often the agent calls a tool, not a timer. A worker inside
-one long build or one slow model turn can exceed `TASK_LEASE_DURATION_MS` while
-still healthy, lose its lease, and have the task requeued underneath it.
-`completeTask()` takes no agent id and does not check `leaseOwnerId`, so the
-original process can still write results for a task another worker now owns. The
-database guarantees one claim at a time. The system does not yet guarantee one
-worker at a time.
+**Leases are not fenced on the MCP tool path.** Lease renewal is driven by the
+`PostToolUse` hook, so the cadence is however often the agent calls a tool, not a
+timer. A worker inside one long build can exceed `TASK_LEASE_DURATION_MS` while
+still healthy and have its task requeued underneath it. The HTTP completion
+endpoint does guard this: it returns 403 if the task belongs to another agent and
+treats a non-`in_progress` task as already finished. The `store-progress` MCP
+tool does not check ownership, so on that path a worker whose lease was reclaimed
+can still write a result for a task another worker now owns.
+
+**No process-level durability test.** `bun run demo` and the test suite simulate
+worker death by letting the lease lapse, which is exactly what the server
+observes, but neither kills an operating system process running a real agent.
 
 **`dead_letter` has no API or UI surface.** `getDeadLetterTasks()` and
-`requeueDeadLetterTask()` exist and are tested, but nothing outside the test
-suite calls them. A dead-lettered task is not visible in the dashboard and cannot
-be requeued without a direct database call.
+`requeueDeadLetterTask()` are tested but called from nothing else, so a
+dead-lettered task is invisible in the dashboard and needs a direct database
+query to find.
 
-**sqlite-vec does not load on macOS or on CI.** Both print
-`sqlite-vec not available, falling back to in-memory cosine`, so every similarity
-search runs the brute-force O(n) path. The indexed path exists but is exercised
-in neither environment. The `apiary eval` figures above are measuring the
-fallback.
+**sqlite-vec does not load on macOS or CI.** Both print `sqlite-vec not
+available, falling back to in-memory cosine`, so every similarity search runs the
+brute-force O(n) path and the eval figures above measure the fallback.
 
-**The default database file is still `agent-swarm-db.sqlite`.** The rename to
-apiary was never applied to the default path.
+**The default database file is still `agent-swarm-db.sqlite`.** Renaming it would
+orphan an existing database on next start, so it has been left alone.
 
-**Inherited and unverified.** The following came from upstream and have not been
-run by me: the Docker lead and worker images, the dashboard UI, and
-`apiary eval --provider openai`. `package.json` declares `bun >=1.0.26`; the only
-version this has been run on is 1.4.0. Dependencies use caret ranges, so
-reproducibility depends on the committed `bun.lock` and `--frozen-lockfile`.
+**Inherited and unverified.** Not run by me: the Docker lead and worker images,
+the dashboard UI, and `apiary eval --provider openai`. `package.json` declares
+`bun >=1.0.26`; the only version this has run on is 1.4.0. Dependencies use caret
+ranges, so reproducibility depends on the committed `bun.lock` with
+`--frozen-lockfile`.
 
 **Upstream leftovers.** `CHANGELOG.md` is 100 KB of upstream release history for
 versions this fork never shipped. `thoughts/` and `designs/` are upstream's
-internal notes, including research on the x402 module this fork removed.
+internal notes.
 
 ## Credit
 
