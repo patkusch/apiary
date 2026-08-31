@@ -434,7 +434,7 @@ describe("Heartbeat Checklist", () => {
 
       const status = gatherSystemStatus({ isBootTriage: true });
       expect(status).toContain("## Reboot-Interrupted Work [auto-generated, ACTION REQUIRED]");
-      expect(status).toContain("auto-failed and a retry task created");
+      expect(status).toContain("returned to the queue under its original id");
       expect(status).toContain("You MUST triage each task above");
     });
 
@@ -453,7 +453,7 @@ describe("Heartbeat Checklist", () => {
       expect(status).toContain(task.id);
     });
 
-    test("isBootTriage shows retry task ID when retry was created", async () => {
+    test("isBootTriage reports a requeued task under its original id", async () => {
       const agent = createAgent({ name: "dead-worker", isLead: false, status: "busy" });
       const task = createTaskExtended("Retryable task", { agentId: agent.id });
       startTask(task.id);
@@ -464,7 +464,24 @@ describe("Heartbeat Checklist", () => {
       await runRebootSweep();
 
       const status = gatherSystemStatus({ isBootTriage: true });
-      expect(status).toContain("→ retry created:");
+      expect(status).toContain("→ requeued (same id, attempt count preserved)");
+      expect(status).toContain(task.id);
+    });
+
+    test("isBootTriage flags a dead-lettered task as needing a human", async () => {
+      const agent = createAgent({ name: "dead-worker-dl", isLead: false, status: "busy" });
+      const task = createTaskExtended("Task out of retries", { agentId: agent.id });
+      startTask(task.id);
+
+      getDb().run("UPDATE agent_tasks SET attempts = maxAttempts, lastUpdatedAt = ? WHERE id = ?", [
+        new Date(Date.now() - 1000).toISOString(),
+        task.id,
+      ]);
+
+      await runRebootSweep();
+
+      const status = gatherSystemStatus({ isBootTriage: true });
+      expect(status).toContain("dead-lettered: retry budget exhausted");
     });
 
     test("isBootTriage shows 'no retry (system task)' for system tasks", async () => {
@@ -481,7 +498,7 @@ describe("Heartbeat Checklist", () => {
       await runRebootSweep();
 
       const status = gatherSystemStatus({ isBootTriage: true });
-      expect(status).toContain("→ no retry (system task)");
+      expect(status).toContain("→ failed, no retry (system task)");
     });
 
     test("isBootTriage includes Orphaned Tasks for pending tasks on offline agents", () => {

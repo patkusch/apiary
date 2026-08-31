@@ -95,7 +95,11 @@ let checklistInterval: ReturnType<typeof setInterval> | null = null;
 let isSweeping = false;
 
 /** Tasks auto-failed during the reboot sweep, consumed by boot triage */
-let rebootAffectedTasks: Array<{ original: AgentTask; retryTaskId: string | null }> = [];
+let rebootAffectedTasks: Array<{
+  original: AgentTask;
+  outcome: "requeued" | "dead_lettered" | "failed";
+  retryTaskId: string | null;
+}> = [];
 
 // ============================================================================
 // Tier 1: Preflight Gate
@@ -262,8 +266,22 @@ function detectAndRemediateStalledTasks(findings: HeartbeatFindings): void {
 
 /**
  * Aggressive sweep that runs once after server restart.
- * Ignores age thresholds — any in_progress task with no active session is auto-failed.
- * Creates exactly one retry task per failed task via parentTaskId.
+ *
+ * Ignores age thresholds: after a restart, any in_progress task with no active
+ * session has definitively lost its worker.
+ *
+ * This used to call failTask() and clone the task under a fresh UUID. That threw
+ * away the lease accounting — the clone started at attempts=0 — so a task that
+ * killed the server on every boot was retried forever under a new id each time,
+ * and the original was recorded as a failure despite never having failed. Since
+ * this sweep runs before the first heartbeat sweep, it also meant the lease
+ * system was bypassed entirely on the single most common cause of interrupted
+ * work: an ordinary deploy.
+ *
+ * It now reclaims the lease instead. Task identity and attempt count survive the
+ * restart, so the retry budget still applies and a genuinely poisonous task
+ * reaches dead_letter rather than looping. System-generated bookkeeping tasks
+ * are still failed outright: re-running a stale boot-triage checklist is noise.
  */
 export async function runRebootSweep(): Promise<void> {
   if (isSweeping) {
@@ -282,7 +300,11 @@ export async function runRebootSweep(): Promise<void> {
       console.log("[Heartbeat] Reboot sweep: no in-progress tasks found");
       return;
     }
-    const reason = "Auto-failed by reboot sweep: worker session not found after server restart";
+    // System bookkeeping tasks are disposable: re-running a stale boot-triage
+    // checklist after a restart is noise, so those are still failed outright.
+    const disposableTaskTypes = ["heartbeat-checklist", "boot-triage", "heartbeat"];
+    const disposableReason =
+      "Auto-failed by reboot sweep: system task interrupted by server restart";
 
     for (const task of allInProgress) {
       if (!task.agentId) {
@@ -295,56 +317,40 @@ export async function runRebootSweep(): Promise<void> {
       const session = getActiveSessionForTask(task.id);
       if (session) continue; // Session exists — worker might still be alive, skip
 
-      // Auto-fail the task
-      const failed = failTask(task.id, reason);
-      if (!failed) continue;
+      if (disposableTaskTypes.includes(task.taskType ?? "")) {
+        const failed = failTask(task.id, disposableReason);
+        if (!failed) continue;
+        rebootAffectedTasks.push({ original: failed, outcome: "failed", retryTaskId: null });
+      } else {
+        // Real work: reclaim the lease so the task keeps its id and its attempt
+        // count, and the retry budget still bounds it.
+        const reclaimed = reclaimTaskLease(task.id);
+        if (!reclaimed) continue;
+        rebootAffectedTasks.push({
+          original: task,
+          outcome: reclaimed.outcome === "requeued" ? "requeued" : "dead_lettered",
+          retryTaskId: null,
+        });
+        console.log(
+          `[Heartbeat] Reboot ${reclaimed.outcome} task ${task.id.slice(0, 8)} ` +
+            `(attempt ${reclaimed.attempts}/${reclaimed.maxAttempts})`,
+        );
+      }
 
-      // Fix agent status
+      // The worker is gone, so the agent is offline rather than idle. Marking it
+      // idle would make it eligible for auto-assignment and hand the task back to
+      // a process that no longer exists.
       if (getActiveTaskCount(task.agentId) === 0) {
-        updateAgentStatus(task.agentId, "idle");
+        updateAgentStatus(task.agentId, "offline");
       }
-
-      // Don't retry system-generated heartbeat tasks
-      const skipRetryTypes = ["heartbeat-checklist", "boot-triage", "heartbeat"];
-      if (skipRetryTypes.includes(task.taskType ?? "")) {
-        rebootAffectedTasks.push({ original: failed, retryTaskId: null });
-        continue;
-      }
-
-      // Auto-retry: create a replacement task with parentTaskId
-      let retryTaskId: string | null = null;
-
-      // Guard: only retry if parent doesn't already have a retry child
-      const existingRetry = getDb()
-        .prepare<{ id: string }, [string]>(
-          `SELECT id FROM agent_tasks
-           WHERE parentTaskId = ?
-             AND status NOT IN ('completed', 'failed', 'cancelled')
-           LIMIT 1`,
-        )
-        .get(task.id);
-
-      if (!existingRetry) {
-        try {
-          const retryTask = createTaskExtended(task.task, {
-            parentTaskId: task.id,
-            tags: ["reboot-retry", "auto-generated"],
-            priority: task.priority,
-            source: task.source,
-            taskType: task.taskType ?? undefined,
-          });
-          retryTaskId = retryTask.id;
-          console.log(`[Heartbeat] Reboot retry created: ${retryTaskId} (parent: ${task.id})`);
-        } catch (err) {
-          console.error(`[Heartbeat] Failed to create retry task for ${task.id}:`, err);
-        }
-      }
-
-      rebootAffectedTasks.push({ original: failed, retryTaskId });
     }
 
+    const requeued = rebootAffectedTasks.filter((t) => t.outcome === "requeued").length;
+    const deadLettered = rebootAffectedTasks.filter((t) => t.outcome === "dead_lettered").length;
+    const failedSystem = rebootAffectedTasks.filter((t) => t.outcome === "failed").length;
     console.log(
-      `[Heartbeat] Reboot sweep complete: ${rebootAffectedTasks.length} task(s) auto-failed and retried`,
+      `[Heartbeat] Reboot sweep complete: ${requeued} requeued, ` +
+        `${deadLettered} dead-lettered, ${failedSystem} system task(s) failed`,
     );
   } finally {
     isSweeping = false;
@@ -591,18 +597,23 @@ export function gatherSystemStatus(options?: { isBootTriage?: boolean }): string
       sections.push(
         "The following tasks were in-progress before the restart. Their workers are no longer active.",
       );
-      sections.push("Each has been auto-failed and a retry task created where applicable.");
+      sections.push(
+        "Each has been returned to the queue under its original id, or parked in dead_letter if its retry budget is spent.",
+      );
       sections.push("");
 
-      for (const { original, retryTaskId } of rebootTasks) {
+      for (const { original, outcome } of rebootTasks) {
         const agentName = original.agentId
           ? (agents.find((a) => a.id === original.agentId)?.name ?? original.agentId)
           : "unassigned";
-        const retryNote = retryTaskId
-          ? `→ retry created: ${retryTaskId}`
-          : "→ no retry (system task)";
+        const note =
+          outcome === "requeued"
+            ? "→ requeued (same id, attempt count preserved)"
+            : outcome === "dead_lettered"
+              ? "→ dead-lettered: retry budget exhausted, needs a human decision"
+              : "→ failed, no retry (system task)";
         sections.push(
-          `- [${original.id}] "${original.task.slice(0, 100)}" — was on ${agentName} ${retryNote}`,
+          `- [${original.id}] "${original.task.slice(0, 100)}" — was on ${agentName} ${note}`,
         );
       }
 
@@ -667,7 +678,7 @@ export async function checkHeartbeatChecklist(): Promise<void> {
       `SELECT id FROM agent_tasks
        WHERE agentId = ?
          AND taskType = 'heartbeat-checklist'
-         AND status NOT IN ('completed', 'failed', 'cancelled')
+         AND status NOT IN ('completed', 'failed', 'cancelled', 'dead_letter')
        LIMIT 1`,
     )
     .get(lead.id);
@@ -834,7 +845,7 @@ export async function createBootTriageTask(): Promise<void> {
       `SELECT id FROM agent_tasks
        WHERE agentId = ?
          AND taskType = 'boot-triage'
-         AND status NOT IN ('completed', 'failed', 'cancelled')
+         AND status NOT IN ('completed', 'failed', 'cancelled', 'dead_letter')
        LIMIT 1`,
     )
     .get(lead.id);

@@ -414,7 +414,7 @@ export async function handleTasks(
       return true;
     }
 
-    const terminalStatuses = ["completed", "failed", "cancelled"];
+    const terminalStatuses = ["completed", "failed", "cancelled", "dead_letter"];
     if (terminalStatuses.includes(task.status)) {
       jsonError(res, `Cannot cancel task with status '${task.status}'`, 400);
       return true;

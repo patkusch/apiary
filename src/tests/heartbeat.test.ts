@@ -481,7 +481,7 @@ describe("Heartbeat Triage", () => {
       expect(affected.length).toBe(0);
     });
 
-    test("auto-fails in_progress task with no session and creates retry", async () => {
+    test("requeues an interrupted task under its original id", async () => {
       const agent = createAgent({ name: "dead-worker", isLead: false, status: "busy" });
       const task = createTaskExtended("Interrupted task", { agentId: agent.id });
       startTask(task.id);
@@ -492,32 +492,39 @@ describe("Heartbeat Triage", () => {
 
       await runRebootSweep();
 
-      // Original task should be failed
+      // A restart is not a task failure. The task goes back to the pool keeping
+      // its identity, so its attempt count still bounds it.
       const updated = getTaskById(task.id);
-      expect(updated?.status).toBe("failed");
-      expect(updated?.failureReason).toContain("reboot sweep");
+      expect(updated?.status).toBe("unassigned");
+      expect(updated?.agentId).toBeNull();
 
-      // Retry task should exist
       const affected = getRebootAffectedTasks();
       expect(affected.length).toBe(1);
       expect(affected[0]!.original.id).toBe(task.id);
-      expect(affected[0]!.retryTaskId).not.toBeNull();
+      expect(affected[0]!.outcome).toBe("requeued");
 
-      // Verify retry task in DB
-      const retryTask = getTaskById(affected[0]!.retryTaskId!);
-      expect(retryTask).not.toBeNull();
-      expect(retryTask!.parentTaskId).toBe(task.id);
-      expect(retryTask!.task).toBe(task.task);
-      // No agentId → goes to pool as "unassigned", auto-assign will route it
-      expect(retryTask!.status).toBe("unassigned");
+      // No clone is created — that was the old behaviour and it reset the budget.
+      const clones = getDb().query("SELECT * FROM agent_tasks WHERE parentTaskId = ?").all(task.id);
+      expect(clones.length).toBe(0);
+    });
 
-      // Verify retry has correct tags
-      const retryRow = getDb()
-        .query("SELECT tags FROM agent_tasks WHERE id = ?")
-        .get(affected[0]!.retryTaskId!) as { tags: string };
-      const tags = JSON.parse(retryRow.tags);
-      expect(tags).toContain("reboot-retry");
-      expect(tags).toContain("auto-generated");
+    test("dead-letters an interrupted task whose retry budget is spent", async () => {
+      const agent = createAgent({ name: "dead-worker-budget", isLead: false, status: "busy" });
+      const task = createTaskExtended("Task that keeps killing the server", { agentId: agent.id });
+      startTask(task.id);
+
+      // Simulate a task that has already burned its budget across earlier boots.
+      getDb().run("UPDATE agent_tasks SET attempts = maxAttempts, lastUpdatedAt = ? WHERE id = ?", [
+        new Date(Date.now() - 1000).toISOString(),
+        task.id,
+      ]);
+
+      await runRebootSweep();
+
+      // The whole point of preserving identity: a task that crashes the server
+      // every boot terminates instead of looping forever under a fresh id.
+      expect(getTaskById(task.id)?.status).toBe("dead_letter");
+      expect(getRebootAffectedTasks()[0]!.outcome).toBe("dead_lettered");
     });
 
     test("skips in_progress task that has an active session", async () => {
@@ -641,7 +648,7 @@ describe("Heartbeat Triage", () => {
       expect(retries.length).toBe(0);
     });
 
-    test("sets agent to idle after auto-failing its only task", async () => {
+    test("takes the dead worker offline after reclaiming its only task", async () => {
       const agent = createAgent({ name: "dead-worker", isLead: false, status: "busy" });
       const task = createTaskExtended("Interrupted task", { agentId: agent.id });
       startTask(task.id);
@@ -651,10 +658,12 @@ describe("Heartbeat Triage", () => {
 
       await runRebootSweep();
 
+      // Not idle: the server just restarted, so this worker process is gone.
+      // Idle would make it eligible for auto-assignment again.
       const agentRow = getDb().query("SELECT status FROM agents WHERE id = ?").get(agent.id) as {
         status: string;
       };
-      expect(agentRow.status).toBe("idle");
+      expect(agentRow.status).toBe("offline");
     });
 
     test("concurrent calls only process tasks once (dedup guard)", async () => {
@@ -668,19 +677,24 @@ describe("Heartbeat Triage", () => {
       // Run two sweeps concurrently
       await Promise.all([runRebootSweep(), runRebootSweep()]);
 
-      // Only one retry should be created
-      const retries = getDb()
-        .query("SELECT * FROM agent_tasks WHERE parentTaskId = ?")
-        .all(task.id);
-      expect(retries.length).toBe(1);
+      // The task must be reclaimed exactly once. A second reclaim would burn a
+      // second attempt for a single restart and bring dead_letter closer.
+      const updated = getTaskById(task.id);
+      expect(updated?.status).toBe("unassigned");
+      expect(updated?.attempts).toBe(0);
+
+      const clones = getDb().query("SELECT * FROM agent_tasks WHERE parentTaskId = ?").all(task.id);
+      expect(clones.length).toBe(0);
     });
 
-    test("preserves task priority and source in retry", async () => {
+    test("preserves task metadata across the restart", async () => {
       const agent = createAgent({ name: "dead-worker", isLead: false, status: "busy" });
       const task = createTaskExtended("High priority task", {
         agentId: agent.id,
         priority: 90,
         source: "slack",
+        slackChannelId: "C123",
+        slackThreadTs: "1700000000.000100",
       });
       startTask(task.id);
 
@@ -689,12 +703,14 @@ describe("Heartbeat Triage", () => {
 
       await runRebootSweep();
 
-      const affected = getRebootAffectedTasks();
-      expect(affected.length).toBe(1);
-
-      const retryTask = getTaskById(affected[0]!.retryTaskId!);
-      expect(retryTask!.priority).toBe(90);
-      expect(retryTask!.source).toBe("slack");
+      // Keeping the row means metadata survives for free. The old clone copied
+      // priority and source but dropped the Slack thread, so the reply from the
+      // retry landed nowhere.
+      const requeued = getTaskById(task.id);
+      expect(requeued!.priority).toBe(90);
+      expect(requeued!.source).toBe("slack");
+      expect(requeued!.slackChannelId).toBe("C123");
+      expect(requeued!.slackThreadTs).toBe("1700000000.000100");
     });
   });
 
