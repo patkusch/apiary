@@ -7,7 +7,7 @@
 
 <p align="center">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="MIT License"></a>
-  <img src="https://img.shields.io/badge/tests-3739%20passing-brightgreen?style=flat-square" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-3745%20passing-brightgreen?style=flat-square" alt="Tests">
   <img src="https://img.shields.io/badge/runtime-bun-black?style=flat-square" alt="Bun">
 </p>
 
@@ -85,7 +85,7 @@ and is still open.
 ## Status
 
 **v0.1.0** — durability, layering, scope reduction and the eval harness are done
-and covered by tests. Full suite: **3739 tests, 0 failures**.
+and covered by tests. Full suite: **3745 tests, 0 failures**.
 
 | Area | State |
 |---|---|
@@ -94,6 +94,10 @@ and covered by tests. Full suite: **3739 tests, 0 failures**.
 | Reclaimed tasks no longer returned to dead workers | ✅ Done, tested |
 | Crypto-wallet scope removed (`src/x402`) | ✅ Done |
 | Memory eval harness (`apiary eval`) | ✅ Done, tested |
+| `dead_letter` treated as terminal everywhere | ✅ Done, tested |
+| Server restart reclaims leases instead of cloning tasks | ✅ Done, tested |
+| Fencing token so a reclaimed worker cannot still write | ⬜ Open, see Known limitations |
+| Leases on the direct-assign path (`startTask`/`resumeTask`) | ⬜ Open, see Known limitations |
 | End-to-end memory ablation (task success with memory on/off) | ⬜ Next |
 | Break up the 9.4k-line `db.ts` into repositories | ⬜ Planned |
 
@@ -183,6 +187,50 @@ apply to everything this fork has not changed.
 Retry budget is per-task via `maxAttempts` (default `3`). Dead-lettered tasks are
 listed by `getDeadLetterTasks()` and can be returned to the pool with a fresh
 budget via `requeueDeadLetterTask()`.
+
+## Known limitations
+
+Each of these has been confirmed in the code or by running it. Nothing here is
+speculative.
+
+**Leases have no fencing token.** Renewal is driven by the `PostToolUse` hook, so
+the cadence is however often the agent calls a tool, not a timer. A worker inside
+one long build or one slow model turn can exceed `TASK_LEASE_DURATION_MS` while
+still healthy, lose its lease, and have the task requeued underneath it.
+`completeTask()` takes no agent id and does not check `leaseOwnerId`, so the
+original process can still write results for a task another worker now owns. The
+database guarantees one claim at a time. The system does not yet guarantee one
+worker at a time.
+
+**The direct-assign path takes no lease.** `claimTask()` leases and counts
+attempts. `startTask()` and `resumeTask()` do not: they set `in_progress` with a
+null lease and never increment `attempts`. Those tasks are still recovered by the
+heartbeat stall detector, but they are not bounded by the retry budget, because
+the counter never moves.
+
+**`dead_letter` has no API or UI surface.** `getDeadLetterTasks()` and
+`requeueDeadLetterTask()` exist and are tested, but nothing outside the test
+suite calls them. A dead-lettered task is not visible in the dashboard and cannot
+be requeued without a direct database call.
+
+**sqlite-vec does not load on macOS or on CI.** Both print
+`sqlite-vec not available, falling back to in-memory cosine`, so every similarity
+search runs the brute-force O(n) path. The indexed path exists but is exercised
+in neither environment. The `apiary eval` figures above are measuring the
+fallback.
+
+**The default database file is still `agent-swarm-db.sqlite`.** The rename to
+apiary was never applied to the default path.
+
+**Inherited and unverified.** The following came from upstream and have not been
+run by me: the Docker lead and worker images, the dashboard UI, and
+`apiary eval --provider openai`. `package.json` declares `bun >=1.0.26`; the only
+version this has been run on is 1.4.0. Dependencies use caret ranges, so
+reproducibility depends on the committed `bun.lock` and `--frozen-lockfile`.
+
+**Upstream leftovers.** `CHANGELOG.md` is 100 KB of upstream release history for
+versions this fork never shipped. `thoughts/` and `designs/` are upstream's
+internal notes, including research on the x402 module this fork removed.
 
 ## Credit
 
