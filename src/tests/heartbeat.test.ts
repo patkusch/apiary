@@ -677,11 +677,12 @@ describe("Heartbeat Triage", () => {
       // Run two sweeps concurrently
       await Promise.all([runRebootSweep(), runRebootSweep()]);
 
-      // The task must be reclaimed exactly once. A second reclaim would burn a
-      // second attempt for a single restart and bring dead_letter closer.
+      // The task must be reclaimed exactly once. startTask spent one attempt when
+      // work began; a second reclaim would burn another for a single restart and
+      // bring dead_letter closer.
       const updated = getTaskById(task.id);
       expect(updated?.status).toBe("unassigned");
-      expect(updated?.attempts).toBe(0);
+      expect(updated?.attempts).toBe(1);
 
       const clones = getDb().query("SELECT * FROM agent_tasks WHERE parentTaskId = ?").all(task.id);
       expect(clones.length).toBe(0);

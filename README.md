@@ -7,7 +7,7 @@
 
 <p align="center">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="MIT License"></a>
-  <img src="https://img.shields.io/badge/tests-3749%20passing-brightgreen?style=flat-square" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-3751%20passing-brightgreen?style=flat-square" alt="Tests">
   <img src="https://img.shields.io/badge/runtime-bun-black?style=flat-square" alt="Bun">
 </p>
 
@@ -85,7 +85,7 @@ and is still open.
 ## Status
 
 **v0.1.0** — durability, layering, scope reduction and the eval harness are done
-and covered by tests. Full suite: **3749 tests, 0 failures**.
+and covered by tests. Full suite: **3751 tests, 0 failures**.
 
 | Area | State |
 |---|---|
@@ -97,7 +97,7 @@ and covered by tests. Full suite: **3749 tests, 0 failures**.
 | `dead_letter` treated as terminal everywhere | ✅ Done, tested |
 | Server restart reclaims leases instead of cloning tasks | ✅ Done, tested |
 | Fencing token so a reclaimed worker cannot still write | ⬜ Open, see Known limitations |
-| Leases on the direct-assign path (`startTask`/`resumeTask`) | ⬜ Open, see Known limitations |
+| Leases on the direct-assign path (`startTask`/`resumeTask`) | ✅ Done, tested |
 | End-to-end memory ablation (task success with memory on/off) | ⬜ Next |
 | Break up the 9.4k-line `db.ts` into repositories | ⬜ Planned |
 
@@ -201,12 +201,6 @@ still healthy, lose its lease, and have the task requeued underneath it.
 original process can still write results for a task another worker now owns. The
 database guarantees one claim at a time. The system does not yet guarantee one
 worker at a time.
-
-**The direct-assign path takes no lease.** `claimTask()` leases and counts
-attempts. `startTask()` and `resumeTask()` do not: they set `in_progress` with a
-null lease and never increment `attempts`. Those tasks are still recovered by the
-heartbeat stall detector, but they are not bounded by the retry budget, because
-the counter never moves.
 
 **`dead_letter` has no API or UI surface.** `getDeadLetterTasks()` and
 `requeueDeadLetterTask()` exist and are tested, but nothing outside the test

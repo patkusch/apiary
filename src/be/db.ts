@@ -1188,12 +1188,32 @@ export function startTask(taskId: string): AgentTask | null {
     return null;
   }
 
+  // Take a lease, the same way claimTask does. Without this, a task assigned
+  // directly to an agent ran with a null lease and an attempt count that never
+  // moved, so the retry budget did not bound it and the reaper could not see it.
+  //
+  // Only count an attempt when work actually starts, not on every call: startTask
+  // is reachable for a task that is already in_progress, and re-counting there
+  // would walk a healthy task toward dead_letter for no reason.
+  //
+  // The lease owner is the assigned agent. If the task has no agent there is
+  // nobody to renew the lease, so leave it unleased rather than hand the reaper a
+  // task that can never be kept alive.
+  const startsWork = oldTask.status !== "in_progress";
+  const leaseOwnerId = oldTask.agentId;
+  const leaseExpiresAt = leaseOwnerId ? computeLeaseExpiry() : null;
+
   const row = getDb()
-    .prepare<AgentTaskRow, [string]>(
-      `UPDATE agent_tasks SET status = 'in_progress', lastUpdatedAt = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+    .prepare<AgentTaskRow, [number, string | null, string | null, string]>(
+      `UPDATE agent_tasks
+         SET status = 'in_progress',
+             lastUpdatedAt = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+             attempts = attempts + ?,
+             leaseExpiresAt = COALESCE(?, leaseExpiresAt),
+             leaseOwnerId = COALESCE(?, leaseOwnerId)
        WHERE id = ? AND status NOT IN ('completed', 'failed', 'cancelled', 'dead_letter') RETURNING *`,
     )
-    .get(taskId);
+    .get(startsWork ? 1 : 0, leaseExpiresAt, leaseOwnerId, taskId);
   if (row && oldTask) {
     try {
       createLogEntry({
@@ -1954,16 +1974,25 @@ export function resumeTask(taskId: string): AgentTask | null {
   const oldTask = getTaskById(taskId);
   if (!oldTask || oldTask.status !== "paused") return null;
 
+  // Resuming takes a fresh lease but does NOT count a new attempt. A pause and
+  // resume is a continuation of the same attempt, usually across a graceful
+  // shutdown. Counting it would let a task that legitimately pauses three times
+  // exhaust its retry budget and land in dead_letter having never failed.
+  const leaseOwnerId = oldTask.agentId;
+  const leaseExpiresAt = leaseOwnerId ? computeLeaseExpiry() : null;
+
   const row = getDb()
-    .prepare<AgentTaskRow, [string]>(
+    .prepare<AgentTaskRow, [string | null, string | null, string]>(
       `UPDATE agent_tasks
        SET status = 'in_progress',
            was_paused = 1,
-           lastUpdatedAt = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+           lastUpdatedAt = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+           leaseExpiresAt = COALESCE(?, leaseExpiresAt),
+           leaseOwnerId = COALESCE(?, leaseOwnerId)
        WHERE id = ? AND status = 'paused'
        RETURNING *`,
     )
-    .get(taskId);
+    .get(leaseExpiresAt, leaseOwnerId, taskId);
 
   if (row && oldTask) {
     try {
