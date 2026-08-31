@@ -1,6 +1,8 @@
-# Agent Swarm
+# apiary
 
-Multi-agent orchestration for Claude Code, Codex, Gemini CLI. Bun + TypeScript, `bun:sqlite` (WAL), Biome, Ink CLI.
+Durable multi-agent orchestration for coding agents. Hard fork of
+[desplega-ai/agent-swarm](https://github.com/desplega-ai/agent-swarm) (MIT).
+Bun + TypeScript, `bun:sqlite` (WAL), Biome, Ink CLI.
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md) to get set up. Start the server with `bun run start:http`.
 
@@ -31,6 +33,20 @@ runbooks/              # Operational runbooks (local dev, etc.)
 
 The API server (`src/http.ts`, `src/server.ts`, `src/tools/`, `src/http/`) is the **sole owner** of the SQLite database. Worker-side code (`src/commands/`, `src/hooks/`, `src/providers/`, `src/prompts/`, `src/cli.tsx`, `src/claude.ts`) must **never** import from `src/be/db` or `bun:sqlite`. Workers talk to the API over HTTP using `API_KEY` and `X-Agent-ID` headers. Enforced by `scripts/check-db-boundary.sh` (pre-push hook + CI).
 
+**Task durability.** A task that is `in_progress` holds a lease. Both entry points
+take one: `claimTask()` (pool) and `startTask()` (assigned directly). Each spends
+one attempt; `resumeTask()` re-leases without spending one, because a pause and
+resume continues the same attempt. The worker renews via its session heartbeat,
+guarded on `leaseOwnerId`. A lapsed lease means nobody is working on the task, so
+the reaper requeues it rather than failing it, and only sends it to `dead_letter`
+once `attempts` reaches `maxAttempts`. `dead_letter` is terminal everywhere:
+progress writes, restarts and completions are all refused, and
+`requeueDeadLetterTask()` is the only way back.
+
+When touching this, keep the invariant that a restart must not reset the retry
+budget — that was the bug that motivated the fork. `src/tests/task-leases.test.ts`
+covers it, and `bun run demo` shows it end to end.
+
 <important if="you need to run commands to build, test, lint, start the server, or generate code">
 
 ## Commands
@@ -38,6 +54,8 @@ The API server (`src/http.ts`, `src/server.ts`, `src/tools/`, `src/http/`) is th
 | Command | What it does |
 |---|---|
 | `bun install` | Install deps |
+| `bun run demo` | Durability demo: lease lifecycle against a real DB, timestamped |
+| `bun run eval` | Score memory retrieval against the golden set |
 | `bun run start:http` | MCP HTTP server (port 3013) |
 | `bun run dev:http` | Hot reload, portless: `https://api.swarm.localhost:1355` |
 | `bun run lint:fix` | Lint & format with Biome |
