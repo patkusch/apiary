@@ -126,7 +126,9 @@ export const registerStoreProgressTool = (server: McpServer) => {
         }
 
         let updatedTask = existingTask;
-        const isTerminal = ["completed", "failed", "cancelled"].includes(existingTask.status);
+        const isTerminal = ["completed", "failed", "cancelled", "dead_letter"].includes(
+          existingTask.status,
+        );
 
         // Idempotency guard: short-circuit terminal-status writes (completed/failed)
         // BEFORE any side-effects fire (event emission, memory write, follow-up task,

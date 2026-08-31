@@ -1113,7 +1113,7 @@ export const taskQueries = {
   setProgress: () =>
     getDb().prepare<AgentTaskRow, [string, string]>(
       `UPDATE agent_tasks SET progress = ?,
-       status = CASE WHEN status IN ('completed', 'failed', 'cancelled') THEN status ELSE 'in_progress' END,
+       status = CASE WHEN status IN ('completed', 'failed', 'cancelled', 'dead_letter') THEN status ELSE 'in_progress' END,
        lastUpdatedAt = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
        WHERE id = ? RETURNING *`,
     ),
@@ -1184,14 +1184,14 @@ export function startTask(taskId: string): AgentTask | null {
   if (!oldTask) return null;
 
   // Guard: never revive tasks that are already in a terminal state
-  if (["completed", "failed", "cancelled"].includes(oldTask.status)) {
+  if (["completed", "failed", "cancelled", "dead_letter"].includes(oldTask.status)) {
     return null;
   }
 
   const row = getDb()
     .prepare<AgentTaskRow, [string]>(
       `UPDATE agent_tasks SET status = 'in_progress', lastUpdatedAt = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-       WHERE id = ? AND status NOT IN ('completed', 'failed', 'cancelled') RETURNING *`,
+       WHERE id = ? AND status NOT IN ('completed', 'failed', 'cancelled', 'dead_letter') RETURNING *`,
     )
     .get(taskId);
   if (row && oldTask) {
@@ -1788,7 +1788,7 @@ export function completeTask(id: string, output?: string): AgentTask | null {
   // Idempotency guard: don't re-complete a task already in a terminal state.
   // Mirrors cancelTask. Prevents duplicate task.completed events, duplicate
   // log entries, and duplicate follow-up tasks when multiple sessions race.
-  if (["completed", "failed", "cancelled"].includes(oldTask.status)) {
+  if (["completed", "failed", "cancelled", "dead_letter"].includes(oldTask.status)) {
     return null;
   }
 
@@ -1833,7 +1833,7 @@ export function failTask(id: string, reason: string): AgentTask | null {
   // Idempotency guard: don't re-fail a task already in a terminal state.
   // Mirrors cancelTask / completeTask. Prevents duplicate task.failed events
   // and duplicate follow-up tasks when multiple sessions race.
-  if (["completed", "failed", "cancelled"].includes(oldTask.status)) {
+  if (["completed", "failed", "cancelled", "dead_letter"].includes(oldTask.status)) {
     return null;
   }
 
@@ -1870,7 +1870,7 @@ export function cancelTask(id: string, reason?: string): AgentTask | null {
   if (!oldTask) return null;
 
   // Only cancel tasks that are not already in a terminal state
-  const terminalStatuses = ["completed", "failed", "cancelled"];
+  const terminalStatuses = ["completed", "failed", "cancelled", "dead_letter"];
   if (terminalStatuses.includes(oldTask.status)) {
     return null;
   }
@@ -2257,7 +2257,7 @@ export function findRecentSimilarTasks(opts: {
   const params: (string | number)[] = [since];
 
   // Exclude completed/failed/cancelled tasks — only active or recently created
-  conditions.push("status NOT IN ('completed', 'failed', 'cancelled')");
+  conditions.push("status NOT IN ('completed', 'failed', 'cancelled', 'dead_letter')");
 
   if (opts.creatorAgentId) {
     conditions.push("creatorAgentId = ?");
@@ -6293,7 +6293,7 @@ export function getStuckWorkflowRuns(): StuckWorkflowRun[] {
       JOIN workflow_run_steps wrs ON wrs.runId = wr.id AND wrs.status = 'waiting'
       JOIN agent_tasks at ON at.workflowRunStepId = wrs.id
       WHERE wr.status = 'waiting'
-        AND at.status IN ('completed', 'failed', 'cancelled')`,
+        AND at.status IN ('completed', 'failed', 'cancelled', 'dead_letter')`,
     )
     .all();
 }

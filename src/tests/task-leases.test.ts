@@ -1,11 +1,14 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { unlink } from "node:fs/promises";
 import {
+  cancelTask,
   claimTask,
   closeDb,
+  completeTask,
   createAgent,
   createTaskExtended,
   DEFAULT_MAX_TASK_ATTEMPTS,
+  failTask,
   getDb,
   getDeadLetterTasks,
   getTaskById,
@@ -14,7 +17,9 @@ import {
   reclaimTaskLease,
   renewTaskLease,
   requeueDeadLetterTask,
+  startTask,
   TASK_LEASE_DURATION_MS,
+  updateTaskProgress,
 } from "../be/db";
 
 const TEST_DB_PATH = "./test-task-leases.sqlite";
@@ -177,5 +182,47 @@ describe("task leases", () => {
   test("reclaimTaskLease ignores tasks that are not in flight", () => {
     const task = createTaskExtended("not started");
     expect(reclaimTaskLease(task.id)).toBeNull();
+  });
+
+  // Once the retry budget is spent, dead_letter must behave as a terminal state.
+  // Every one of these was an escape hatch: dead_letter was missing from the
+  // terminal-status lists, so ordinary task operations silently revived a task
+  // that had already exhausted its bound.
+  describe("dead_letter is terminal", () => {
+    function deadLetter(): string {
+      const task = createTaskExtended("exhausts its budget");
+      for (let i = 0; i < DEFAULT_MAX_TASK_ATTEMPTS; i++) {
+        claimTask(task.id, agentA);
+        expireLease(task.id);
+        reclaimExpiredTaskLeases();
+      }
+      expect(getTaskById(task.id)?.status).toBe("dead_letter");
+      return task.id;
+    }
+
+    test("a progress update does not resurrect it", () => {
+      const id = deadLetter();
+      updateTaskProgress(id, "still going");
+      expect(getTaskById(id)?.status).toBe("dead_letter");
+    });
+
+    test("startTask cannot restart it", () => {
+      const id = deadLetter();
+      expect(startTask(id)).toBeNull();
+      expect(getTaskById(id)?.status).toBe("dead_letter");
+    });
+
+    test("completeTask, failTask and cancelTask are no-ops on it", () => {
+      const id = deadLetter();
+      expect(completeTask(id, "done")).toBeNull();
+      expect(failTask(id, "nope")).toBeNull();
+      expect(cancelTask(id, "nope")).toBeNull();
+      expect(getTaskById(id)?.status).toBe("dead_letter");
+    });
+
+    test("it is only revived through the explicit requeue path", () => {
+      const id = deadLetter();
+      expect(requeueDeadLetterTask(id)?.status).toBe("unassigned");
+    });
   });
 });
