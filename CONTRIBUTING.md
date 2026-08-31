@@ -23,8 +23,8 @@ Thanks for your interest in contributing to Agent Swarm!
 ### Install Dependencies
 
 ```bash
-git clone https://github.com/desplega-ai/agent-swarm.git
-cd agent-swarm
+git clone https://github.com/patkusch/apiary.git
+cd apiary
 bun install
 ```
 
@@ -192,7 +192,7 @@ bun run build:binary
 bun run build:binary:arm64
 ```
 
-Output: `./dist/agent-swarm`
+Output: `./dist/apiary`
 
 ### Docker Images
 
@@ -209,7 +209,7 @@ bun run deploy:docker
 ## Project Structure
 
 ```
-agent-swarm/
+apiary/
 ├── src/
 │   ├── cli.tsx          # CLI entry point (Ink/React)
 │   ├── http.ts          # HTTP server entry

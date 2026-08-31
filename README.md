@@ -7,7 +7,7 @@
 
 <p align="center">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="MIT License"></a>
-  <img src="https://img.shields.io/badge/tests-3745%20passing-brightgreen?style=flat-square" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-3749%20passing-brightgreen?style=flat-square" alt="Tests">
   <img src="https://img.shields.io/badge/runtime-bun-black?style=flat-square" alt="Bun">
 </p>
 
@@ -85,7 +85,7 @@ and is still open.
 ## Status
 
 **v0.1.0** — durability, layering, scope reduction and the eval harness are done
-and covered by tests. Full suite: **3745 tests, 0 failures**.
+and covered by tests. Full suite: **3749 tests, 0 failures**.
 
 | Area | State |
 |---|---|
@@ -104,7 +104,7 @@ and covered by tests. Full suite: **3745 tests, 0 failures**.
 ### `apiary eval`
 
 ```bash
-bun src/cli.tsx eval
+bun run eval
 ```
 
 Seeds a golden corpus into the real memory store, runs each labelled query

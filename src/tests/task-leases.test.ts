@@ -225,4 +225,67 @@ describe("task leases", () => {
       expect(requeueDeadLetterTask(id)?.status).toBe("unassigned");
     });
   });
+
+  // These pin behaviour the README lists under "Known limitations". They assert
+  // what the code currently does, not what it should do. If someone closes one of
+  // these gaps, the corresponding test fails, which is the point: it forces the
+  // README to be updated in the same change rather than quietly going stale.
+  describe("documented limitations", () => {
+    /** The direct-assign path: assigned to an agent, then started. */
+    function directlyAssignedInProgress(): string {
+      const task = createTaskExtended("assigned directly, not claimed from the pool", {
+        agentId: agentA,
+      });
+      expect(getTaskById(task.id)?.status).toBe("pending");
+      startTask(task.id);
+      expect(getTaskById(task.id)?.status).toBe("in_progress");
+      return task.id;
+    }
+
+    test("startTask takes no lease and does not count the attempt", () => {
+      const id = directlyAssignedInProgress();
+      const task = getTaskById(id);
+
+      expect(task?.leaseExpiresAt).toBeUndefined();
+      expect(task?.leaseOwnerId).toBeUndefined();
+      expect(task?.attempts).toBe(0);
+    });
+
+    test("a directly-assigned task is invisible to the lease reaper", () => {
+      const id = directlyAssignedInProgress();
+      // Age it well past any lease duration. The reaper still skips it, because
+      // its query requires leaseExpiresAt IS NOT NULL and this task has no lease.
+      getDb()
+        .prepare("UPDATE agent_tasks SET lastUpdatedAt = ? WHERE id = ?")
+        .run(new Date(Date.now() - 10 * TASK_LEASE_DURATION_MS).toISOString(), id);
+
+      expect(reclaimExpiredTaskLeases()).toHaveLength(0);
+      expect(getTaskById(id)?.status).toBe("in_progress");
+    });
+
+    test("the heartbeat's force-reclaim still recovers it, so it is not stranded", () => {
+      const id = directlyAssignedInProgress();
+
+      // This is why the gap is a limitation rather than lost work: the stall
+      // detector calls reclaimTaskLease, which synthesises an expired lease.
+      expect(reclaimTaskLease(id)?.outcome).toBe("requeued");
+      expect(getTaskById(id)?.status).toBe("unassigned");
+    });
+
+    test("but its retry budget never advances, so it cannot reach dead_letter", () => {
+      const id = directlyAssignedInProgress();
+
+      // Three assign-start-crash rounds. A pool-claimed task would be
+      // dead-lettered by now; this one is requeued indefinitely because
+      // startTask never increments attempts.
+      for (let i = 0; i < DEFAULT_MAX_TASK_ATTEMPTS; i++) {
+        startTask(id);
+        reclaimTaskLease(id);
+      }
+
+      expect(getTaskById(id)?.attempts).toBe(0);
+      expect(getTaskById(id)?.status).toBe("unassigned");
+      expect(getTaskById(id)?.status).not.toBe("dead_letter");
+    });
+  });
 });

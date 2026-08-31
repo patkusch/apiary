@@ -2574,7 +2574,13 @@ export function reclaimTaskLease(taskId: string): ReclaimedTask | null {
   return reclaimExpiredTaskLeases().find((r) => r.taskId === taskId) ?? null;
 }
 
-/** Tasks parked after exhausting their retry budget. */
+/**
+ * Tasks parked after exhausting their retry budget.
+ *
+ * Not reachable from the HTTP API or the dashboard: nothing outside the test
+ * suite calls this yet, so a dead-lettered task currently needs a direct
+ * database query to find. Listed under "Known limitations" in the README.
+ */
 export function getDeadLetterTasks(limit = 100): AgentTask[] {
   const rows = getDb()
     .prepare<AgentTaskRow, [number]>(
@@ -2584,7 +2590,12 @@ export function getDeadLetterTasks(limit = 100): AgentTask[] {
   return rows.map(rowToAgentTask);
 }
 
-/** Return a dead-lettered task to the pool with a fresh retry budget. */
+/**
+ * Return a dead-lettered task to the pool with a fresh retry budget.
+ *
+ * The only supported way out of dead_letter, which is the point: crossing the
+ * retry bound should take a deliberate decision. Also not yet exposed over HTTP.
+ */
 export function requeueDeadLetterTask(
   taskId: string,
   extraAttempts = DEFAULT_MAX_TASK_ATTEMPTS,
