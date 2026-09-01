@@ -7,8 +7,18 @@
 
 <p align="center">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="MIT License"></a>
-  <img src="https://img.shields.io/badge/tests-3751%20passing-brightgreen?style=flat-square" alt="Tests">
+  <img src="https://img.shields.io/badge/fork%20tests-60%20written%20here-brightgreen?style=flat-square" alt="Tests written for this fork">
+  <img src="https://img.shields.io/badge/suite-3751%20passing%20(3691%20inherited)-lightgrey?style=flat-square" alt="Full suite">
   <img src="https://img.shields.io/badge/runtime-bun-black?style=flat-square" alt="Bun">
+</p>
+
+<p align="center">
+  <sub>
+    Two numbers, deliberately. <b>60</b> tests were written for this fork — 21 for the
+    lease state machine, 39 for the eval harness. The other <b>3,691</b> came with the
+    upstream code and are inherited, not authored here.
+    <a href="#what-is-inherited-and-what-is-not">Full accounting below.</a>
+  </sub>
 </p>
 
 ---
@@ -19,6 +29,33 @@ apiary is a hard fork of [`desplega-ai/agent-swarm`](https://github.com/desplega
 (MIT), by way of [`jamalavedra/agent-swarm`](https://github.com/jamalavedra/agent-swarm).
 It keeps the lead/worker model, the priority pool, budget admission control,
 encrypted secrets and workflows, and changes how task durability works.
+
+### What is inherited, and what is not
+
+Most of this repository is not mine, and the badges above say so. The fork base was
+`agent-swarm` v1.76.3 — 300 files and roughly 381,000 lines imported in a single
+commit ([`1c1a5c1`](../../commit/1c1a5c1)). Everything since is this fork:
+
+| | Files | Lines | Tests |
+|---|---|---|---|
+| **Inherited** at v1.76.3 | ~300 | ~381,000 | 3,691 |
+| **Written here** (59 files touched) | 15 added, 20 modified, 24 deleted | +2,683 / −3,031 | 60 |
+
+What the 2,683 added lines actually are:
+
+- **The lease state machine** — `059_task_leases.sql`, `task-hooks.ts`, `wiring.ts`,
+  and changes to `db.ts`, `heartbeat.ts`, `http/tasks.ts`, `types.ts`. Claim takes a
+  lease, renewal extends it, expiry requeues under a retry budget, and `dead_letter`
+  is a real terminal state. **21 tests.**
+- **The eval harness** — `src/eval/*`, which measures memory retrieval instead of
+  asserting it. **39 tests.**
+- **Deletions** — the crypto-wallet payment scope (x402) removed entirely, which is
+  most of the 3,031 deleted lines and 3 of the deleted test files.
+
+The 3,691 inherited tests are upstream's, and I did not write them. I did make them
+pass on this fork — one of them, an order-dependent Slack mock, was failing CI and is
+fixed in [`69027d1`](../../commit/69027d1). Run `bun test` and you should see 3751
+pass, 0 fail.
 
 ## The failure mode this exists to solve
 
@@ -35,6 +72,17 @@ it. Upstream's own heartbeat prompt told the lead agent to go clean up after it:
 
 That is a missing state machine described to a language model in prose. apiary
 replaces it with a lease.
+
+> **Which upstream, and when.** Everything above is true of the fork base,
+> `agent-swarm` v1.76.3 (August 2026). Upstream has not stood still: by v1.136.0 it
+> had built its own crash recovery on a different design — `crash_recovery` resume
+> tasks pinned back to the original agent, a resume-generation budget, and a
+> stale-pin reaper in the heartbeat (`src/tasks/worker-follow-up.ts`), behind
+> `HEARTBEAT_PIN_CRASH_RESUME`. So this is **not** a live bug report against current
+> upstream, and apiary is not a proposed patch to it. It is a fork that answers the
+> same question with a lease in the database rather than a reaper above it — the
+> tradeoff being that a lease makes the invariant enforceable at claim time, and the
+> reaper makes it recoverable without a schema change.
 
 ## See it happen
 
