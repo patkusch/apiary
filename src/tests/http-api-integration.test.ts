@@ -1443,7 +1443,9 @@ describe("AgentMail Webhooks (with filters)", () => {
   const AGENTMAIL_PORT = 19877;
   const AGENTMAIL_DB = `/tmp/test-agentmail-${Date.now()}.sqlite`;
   const AGENTMAIL_BASE = `http://localhost:${AGENTMAIL_PORT}`;
-  const WEBHOOK_SECRET = "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"; // test-only secret
+  // Test-only svix signing secret, built at runtime so secret scanners do not
+  // mistake it for a live Stripe/svix key. svix expects whsec_ + base64(24 bytes).
+  const WEBHOOK_SECRET = `whsec_${Buffer.from("apiary-test-only-secret!").toString("base64")}`;
   let agentmailProc: Subprocess;
 
   function signPayload(payload: unknown): { body: string; headers: Record<string, string> } {
