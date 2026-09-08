@@ -260,23 +260,23 @@ real numbers. `--min-hit-at 3=0.6` gates CI.
 
 Confirmed in the code or by running it. Nothing here is speculative.
 
-**Leases are not fenced on the MCP tool path.** Lease renewal is driven by the
-`PostToolUse` hook, so the cadence is however often the agent calls a tool, not a
-timer. A worker inside one long build can exceed `TASK_LEASE_DURATION_MS` while
-still healthy and have its task requeued underneath it. The HTTP completion
-endpoint does guard this: it returns 403 if the task belongs to another agent and
-treats a non-`in_progress` task as already finished. The `store-progress` MCP
-tool does not check ownership, so on that path a worker whose lease was reclaimed
-can still write a result for a task another worker now owns.
+**Lease renewal is hook-driven, not timed.** Renewal rides on the `PostToolUse`
+hook, so the cadence is however often the agent calls a tool. A worker inside one
+long build can exceed `TASK_LEASE_DURATION_MS` while still healthy and have its
+task requeued underneath it. Both write paths now refuse the stale worker: the
+HTTP finish endpoint returns 403 if the task belongs to another agent, and the
+`store-progress` MCP tool refuses a task that is assigned to someone else or to
+nobody, and writes nothing. What neither can do is tell a healthy-but-slow
+worker from a dead one; that needs a timer-driven heartbeat, which is not built.
 
 **No process-level durability test.** `bun run demo` and the test suite simulate
 worker death by letting the lease lapse, which is exactly what the server
 observes, but neither kills an operating system process running a real agent.
 
-**`dead_letter` has no API or UI surface.** `getDeadLetterTasks()` and
-`requeueDeadLetterTask()` are tested but called from nothing else, so a
-dead-lettered task is invisible in the dashboard and needs a direct database
-query to find.
+**`dead_letter` has an API but no dashboard surface.** `GET /api/dead-letter-tasks`
+lists parked tasks and `POST /api/tasks/{id}/requeue` is the one way back to the
+pool. The dashboard does not know the status exists, so a dead-lettered task is
+still invisible there.
 
 **sqlite-vec does not load on macOS or CI.** Both print `sqlite-vec not
 available, falling back to in-memory cosine`, so every similarity search runs the

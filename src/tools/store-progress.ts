@@ -146,6 +146,23 @@ export const registerStoreProgressTool = (server: McpServer) => {
           };
         }
 
+        // Lease fencing on the MCP path. The HTTP finish endpoint refuses a
+        // task that belongs to another agent; this tool did not, so a worker
+        // whose lease had lapsed could still write a result over the task's
+        // new owner, or finish a task that had been requeued and belonged to
+        // nobody. Same rule as HTTP now: only the task's current owner reports
+        // on it, and a task with no owner is nobody's to finish.
+        if (existingTask.agentId !== requestInfo.agentId) {
+          return {
+            success: false,
+            message: existingTask.agentId
+              ? `Task "${taskId}" is assigned to agent "${existingTask.agentId}", not to you. ` +
+                `If you were working on it, your lease lapsed and it was re-claimed; nothing was written.`
+              : `Task "${taskId}" is not assigned to any agent (status "${existingTask.status}"). ` +
+                `If you were working on it, your lease lapsed and it was requeued; nothing was written.`,
+          };
+        }
+
         // Update progress if provided (with deduplication)
         // Skip for tasks already in a terminal state to prevent zombie revival
         if (progress && !isTerminal) {

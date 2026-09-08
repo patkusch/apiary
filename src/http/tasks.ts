@@ -7,6 +7,7 @@ import {
   failTask,
   getAllTasks,
   getDb,
+  getDeadLetterTasks,
   getLeadAgent,
   getLogsByTaskId,
   getPausedTasksForAgent,
@@ -14,6 +15,7 @@ import {
   getTasksCount,
   getUserById,
   pauseTask,
+  requeueDeadLetterTask,
   resumeTask,
   updateAgentStatusFromCapacity,
   updateTaskClaudeSessionId,
@@ -189,6 +191,37 @@ const listPausedTasks = route({
   auth: { apiKey: true, agentId: true },
   responses: {
     200: { description: "Paused task list" },
+  },
+});
+
+const listDeadLetterTasks = route({
+  method: "get",
+  path: "/api/dead-letter-tasks",
+  pattern: ["api", "dead-letter-tasks"],
+  summary: "List tasks parked after exhausting their retry budget",
+  description:
+    "A task is dead-lettered when its worker's lease lapsed maxAttempts times. It stays parked until someone requeues it deliberately via POST /api/tasks/{id}/requeue.",
+  tags: ["Tasks"],
+  query: z.object({ limit: z.coerce.number().int().min(1).max(1000).optional() }),
+  responses: {
+    200: { description: "Dead-lettered tasks, most recently updated first" },
+  },
+});
+
+const requeueDeadLetterTaskRoute = route({
+  method: "post",
+  path: "/api/tasks/{id}/requeue",
+  pattern: ["api", "tasks", null, "requeue"],
+  summary: "Return a dead-lettered task to the pool with a fresh retry budget",
+  description:
+    "The only way out of dead_letter. maxAttempts is raised to attempts + extraAttempts (default: the standard budget) so the task can be claimed again.",
+  tags: ["Tasks"],
+  params: z.object({ id: z.string() }),
+  body: z.object({ extraAttempts: z.number().int().min(1).max(100).optional() }).optional(),
+  responses: {
+    200: { description: "Task returned to the pool as unassigned" },
+    404: { description: "Task not found" },
+    409: { description: "Task is not dead-lettered" },
   },
 });
 
@@ -637,6 +670,38 @@ export async function handleTasks(
     }
     const pausedTasks = getPausedTasksForAgent(myAgentId);
     json(res, { tasks: pausedTasks });
+    return true;
+  }
+
+  if (listDeadLetterTasks.match(req.method, pathSegments)) {
+    const parsed = await listDeadLetterTasks.parse(req, res, pathSegments, queryParams);
+    if (!parsed) return true;
+    json(res, { tasks: getDeadLetterTasks(parsed.query.limit) });
+    return true;
+  }
+
+  if (requeueDeadLetterTaskRoute.match(req.method, pathSegments)) {
+    const parsed = await requeueDeadLetterTaskRoute.parse(req, res, pathSegments, queryParams);
+    if (!parsed) return true;
+    const task = getTaskById(parsed.params.id);
+
+    if (!task) {
+      jsonError(res, "Task not found", 404);
+      return true;
+    }
+
+    if (task.status !== "dead_letter") {
+      jsonError(res, `Task status is '${task.status}', not 'dead_letter'`, 409);
+      return true;
+    }
+
+    const requeued = requeueDeadLetterTask(parsed.params.id, parsed.body?.extraAttempts);
+    if (!requeued) {
+      jsonError(res, "Failed to requeue task", 500);
+      return true;
+    }
+
+    json(res, { success: true, task: requeued });
     return true;
   }
 

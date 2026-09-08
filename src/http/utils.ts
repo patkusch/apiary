@@ -42,7 +42,11 @@ export async function parseBody<T = unknown>(req: IncomingMessage): Promise<T> {
   for await (const chunk of req) {
     chunks.push(chunk as Buffer);
   }
-  return JSON.parse(Buffer.concat(chunks).toString()) as T;
+  // An empty body is "no body", not a JSON syntax error: routes with an optional
+  // body accept it, and routes that require one get a validation 400 instead of
+  // a 500 from JSON.parse("").
+  const text = Buffer.concat(chunks).toString();
+  return (text.trim() ? JSON.parse(text) : undefined) as T;
 }
 
 /** Send JSON response */
