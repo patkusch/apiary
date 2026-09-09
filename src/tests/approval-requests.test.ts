@@ -9,11 +9,13 @@ import {
   getAgentCurrentTask,
   getApprovalRequestById,
   getApprovalRequestByStepId,
+  getDb,
   getExpiredPendingApprovals,
   initDb,
   listApprovalRequests,
   resolveApprovalRequest,
   startTask,
+  timeoutExpiredApprovals,
   updateApprovalRequestNotifications,
 } from "../be/db";
 import type { ExecutorMeta } from "../types";
@@ -378,6 +380,49 @@ describe("Approval Requests", () => {
         expect(r.status).toBe("pending");
         expect(r.expiresAt).toBeTruthy();
       }
+    });
+  });
+
+  describe("DB: timeoutExpiredApprovals (heartbeat sweep)", () => {
+    const backdate = (id: string) =>
+      getDb()
+        .prepare("UPDATE approval_requests SET expiresAt = ? WHERE id = ?")
+        .run(new Date(Date.now() - 60_000).toISOString(), id);
+
+    test("times out a standalone request past its deadline, and only that one", () => {
+      const overdue = createApprovalRequest(makeApprovalData({ timeoutSeconds: 60 }));
+      const fresh = createApprovalRequest(makeApprovalData({ timeoutSeconds: 3600 }));
+      const noDeadline = createApprovalRequest(makeApprovalData({}));
+      backdate(overdue.id);
+
+      expect(timeoutExpiredApprovals()).toBe(1);
+
+      const swept = getApprovalRequestById(overdue.id)!;
+      expect(swept.status).toBe("timeout");
+      expect(swept.resolvedBy).toBe("heartbeat");
+      expect(swept.resolvedAt).toBeTruthy();
+      expect(getApprovalRequestById(fresh.id)!.status).toBe("pending");
+      expect(getApprovalRequestById(noDeadline.id)!.status).toBe("pending");
+
+      // A late answer is refused: the request is no longer pending.
+      expect(resolveApprovalRequest(overdue.id, { status: "approved" })).toBeNull();
+      // And a second sweep finds nothing new.
+      expect(timeoutExpiredApprovals()).toBe(0);
+    });
+
+    test("leaves a workflow-bound request to workflow recovery, which must resume the run", () => {
+      const bound = createApprovalRequest(
+        makeApprovalData({
+          workflowRunId: crypto.randomUUID(),
+          workflowRunStepId: crypto.randomUUID(),
+          timeoutSeconds: 60,
+        }),
+      );
+      backdate(bound.id);
+
+      expect(timeoutExpiredApprovals()).toBe(0);
+      expect(getApprovalRequestById(bound.id)!.status).toBe("pending");
+      expect(getExpiredPendingApprovals().map((r) => r.id)).toContain(bound.id);
     });
   });
 

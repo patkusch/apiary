@@ -7211,7 +7211,11 @@ export function getApprovalRequestByStepId(stepId: string): ApprovalRequest | nu
   return row ? rowToApprovalRequest(row) : null;
 }
 
-// TODO: Wire into a periodic cron/sweep to auto-timeout expired approval requests (Phase 2)
+/**
+ * Pending approvals whose deadline has passed. Workflow-bound ones are settled
+ * by `recoverIncompleteRuns` (boot and every heartbeat), which also resumes the
+ * run; standalone ones are settled by `timeoutExpiredApprovals` below.
+ */
 export function getExpiredPendingApprovals(): ApprovalRequest[] {
   const rows = getDb()
     .prepare<ApprovalRequestRow, []>(
@@ -7222,6 +7226,31 @@ export function getExpiredPendingApprovals(): ApprovalRequest[] {
     )
     .all();
   return rows.map(rowToApprovalRequest);
+}
+
+/**
+ * Mark expired standalone approval requests as timed out. Standalone means not
+ * attached to a workflow step: those are resolved by workflow recovery, which
+ * has to resume the run as well, so they are deliberately left alone here.
+ * Without this sweep a standalone request with a deadline stayed `pending`
+ * forever once the deadline passed — the API kept listing it as open, and a
+ * late answer would still have been accepted. Race-safe: the status guard means
+ * a response landing in the same instant wins or loses cleanly, never both.
+ */
+export function timeoutExpiredApprovals(): number {
+  const now = new Date().toISOString();
+  const rows = getDb()
+    .prepare<{ id: string }, [string, string, string]>(
+      `UPDATE approval_requests
+         SET status = 'timeout', resolvedBy = 'heartbeat', resolvedAt = ?, updatedAt = ?
+       WHERE status = 'pending'
+         AND workflowRunStepId IS NULL
+         AND expiresAt IS NOT NULL
+         AND expiresAt < ?
+       RETURNING id`,
+    )
+    .all(now, now, now);
+  return rows.length;
 }
 
 // ============================================================================

@@ -21,6 +21,7 @@ import {
   reclaimTaskLease,
   releaseStaleMentionProcessing,
   releaseStaleProcessingInbox,
+  timeoutExpiredApprovals,
   releaseStaleReviewingTasks,
   updateAgentStatus,
 } from "../be/db";
@@ -83,6 +84,7 @@ export interface HeartbeatFindings {
     mentionProcessing: number;
     inboxProcessing: number;
     workflowRuns: number;
+    approvalRequests: number;
   };
 }
 
@@ -151,6 +153,7 @@ export async function codeLevelTriage(): Promise<HeartbeatFindings> {
       mentionProcessing: 0,
       inboxProcessing: 0,
       workflowRuns: 0,
+      approvalRequests: 0,
     },
   };
 
@@ -436,6 +439,9 @@ async function cleanupStaleResources(findings: HeartbeatFindings): Promise<void>
   findings.staleCleanup.inboxProcessing = releaseStaleProcessingInbox(
     STALE_CLEANUP_THRESHOLD_MINUTES,
   );
+  // Standalone approval requests past their deadline. Workflow-bound ones are
+  // settled (and their runs resumed) by recoverIncompleteRuns just below.
+  findings.staleCleanup.approvalRequests = timeoutExpiredApprovals();
   try {
     findings.staleCleanup.workflowRuns = await recoverIncompleteRuns(getExecutorRegistry());
   } catch {
@@ -731,6 +737,7 @@ export async function runHeartbeatSweep(): Promise<void> {
           mentionProcessing: 0,
           inboxProcessing: 0,
           workflowRuns: 0,
+          approvalRequests: 0,
         },
       };
       await cleanupStaleResources(cleanupOnlyFindings);
