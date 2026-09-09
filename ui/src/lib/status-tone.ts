@@ -11,6 +11,7 @@ export function statusTextClass(status: string | null | undefined): string {
       return "text-status-success";
     case "failed":
     case "cancelled":
+    case "dead_letter":
       return "text-status-error";
     case "in_progress":
     case "busy":

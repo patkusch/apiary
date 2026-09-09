@@ -22,6 +22,7 @@ import {
   Link2,
   Pause,
   Play,
+  RotateCcw,
   Scissors,
   Tag,
   Terminal,
@@ -38,6 +39,7 @@ import { useSessionCosts } from "@/api/hooks/use-costs";
 import {
   useCancelTask,
   usePauseTask,
+  useRequeueTask,
   useResumeTask,
   useTask,
   useTaskContext,
@@ -88,6 +90,7 @@ function logDotColor(eventType: string, newValue?: string): string {
         return "bg-status-success";
       case "failed":
       case "cancelled":
+      case "dead_letter":
         return "bg-status-error";
       case "in_progress":
         return "bg-status-active";
@@ -459,6 +462,7 @@ export default function TaskDetailPage() {
   const { data: costs, isLoading: costsLoading } = useSessionCosts({ taskId: id });
   const { data: contextData, isLoading: contextLoading } = useTaskContext(id!);
   const cancelTask = useCancelTask();
+  const requeueTask = useRequeueTask();
   const pauseTask = usePauseTask();
   const resumeTask = useResumeTask();
   const agentName = useMemo(() => {
@@ -497,12 +501,13 @@ export default function TaskDetailPage() {
     return <p className="text-muted-foreground">Task not found.</p>;
   }
 
-  const terminalStatuses = ["completed", "failed", "cancelled"];
+  const terminalStatuses = ["completed", "failed", "cancelled", "dead_letter"];
   const canCancel = !terminalStatuses.includes(task.status) && task.status !== "paused";
+  const canRequeue = task.status === "dead_letter";
   const canPause = task.status === "in_progress";
   const canResume = task.status === "paused";
 
-  const isFailed = task.status === "failed";
+  const isFailed = task.status === "failed" || task.status === "dead_letter";
   const isCompleted = task.status === "completed";
   const hasSessionLogs = sessionLogs && sessionLogs.length > 0;
   const hasOutput = !!task.output;
@@ -763,7 +768,7 @@ export default function TaskDetailPage() {
       {isFailed && task.failureReason && (
         <CollapsibleSection
           variant="card"
-          title="Failure Reason"
+          title={task.status === "dead_letter" ? "Dead-lettered" : "Failure Reason"}
           icon={AlertTriangle}
           iconColor="text-status-error"
           borderColor="border-status-error/30"
@@ -876,7 +881,7 @@ export default function TaskDetailPage() {
       </div>
       <CollapsibleDescription text={task.task} />
       <div className="flex items-center gap-2">
-        {(canCancel || canPause || canResume) && (
+        {(canCancel || canPause || canResume || canRequeue) && (
           <div className="flex items-center gap-1.5 shrink-0">
             {canPause && (
               <Button
@@ -899,6 +904,35 @@ export default function TaskDetailPage() {
                 <Play className="h-3 w-3 mr-1" />
                 Resume
               </Button>
+            )}
+            {canRequeue && (
+              <AlertDialog>
+                <AlertDialogTrigger asChild>
+                  <Button variant="outline" size="sm">
+                    <RotateCcw className="h-3 w-3 mr-1" />
+                    Requeue
+                  </Button>
+                </AlertDialogTrigger>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>Requeue Task</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      This task exhausted its retry budget
+                      {typeof task.attempts === "number" && typeof task.maxAttempts === "number"
+                        ? ` (${task.attempts} of ${task.maxAttempts} attempts)`
+                        : ""}
+                      . Requeueing returns it to the pool with a fresh budget, so a worker will pick
+                      it up again. Do this only if the cause has been fixed.
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>Leave Parked</AlertDialogCancel>
+                    <AlertDialogAction onClick={() => requeueTask.mutate({ id: task.id })}>
+                      Requeue Task
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
             )}
             {canCancel && (
               <AlertDialog>

@@ -87,6 +87,19 @@ export function useCancelTask() {
   });
 }
 
+export function useRequeueTask() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, extraAttempts }: { id: string; extraAttempts?: number }) =>
+      api.requeueTask(id, extraAttempts),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["tasks"] });
+      queryClient.invalidateQueries({ queryKey: ["task"] });
+      queryClient.invalidateQueries({ queryKey: ["stats"] });
+    },
+  });
+}
+
 export function usePauseTask() {
   const queryClient = useQueryClient();
   return useMutation({

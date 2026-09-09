@@ -273,10 +273,11 @@ worker from a dead one; that needs a timer-driven heartbeat, which is not built.
 worker death by letting the lease lapse, which is exactly what the server
 observes, but neither kills an operating system process running a real agent.
 
-**`dead_letter` has an API but no dashboard surface.** `GET /api/dead-letter-tasks`
-lists parked tasks and `POST /api/tasks/{id}/requeue` is the one way back to the
-pool. The dashboard does not know the status exists, so a dead-lettered task is
-still invisible there.
+**`dead_letter` is reachable, but only just.** `GET /api/dead-letter-tasks` lists
+parked tasks, `POST /api/tasks/{id}/requeue` is the one way back to the pool, and
+the dashboard now shows the status, filters on it, and offers Requeue behind a
+confirmation on the task page. The UI change was verified by building it, not
+by running it against a live swarm.
 
 **sqlite-vec does not load on macOS or CI.** Both print `sqlite-vec not
 available, falling back to in-memory cosine`, so every similarity search runs the

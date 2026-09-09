@@ -89,7 +89,10 @@ interface SessionRowProps {
 
 function SessionRow({ session: s, isActive }: SessionRowProps) {
   const isRunning = RUNNING_STATUSES.has(s.latestStatus);
-  const isFailed = s.latestStatus === "failed" || s.latestStatus === "cancelled";
+  const isFailed =
+    s.latestStatus === "failed" ||
+    s.latestStatus === "cancelled" ||
+    s.latestStatus === "dead_letter";
   return (
     <Link
       to={`/sessions/${s.root.id}`}

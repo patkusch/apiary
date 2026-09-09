@@ -10,7 +10,8 @@ export type AgentTaskStatus =
   | "paused"
   | "completed"
   | "failed"
-  | "cancelled";
+  | "cancelled"
+  | "dead_letter";
 export type AgentTaskSource =
   | "mcp"
   | "slack"
@@ -102,6 +103,9 @@ export interface AgentTask {
   lastUpdatedAt: string;
   finishedAt?: string;
   failureReason?: string;
+  /** Retry budget: lease reclaims so far, and the bound that dead-letters the task. */
+  attempts?: number;
+  maxAttempts?: number;
   output?: string;
   progress?: string;
   model?: string;

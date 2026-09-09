@@ -589,6 +589,7 @@ export default function TasksPage() {
             <SelectItem value="completed">Completed</SelectItem>
             <SelectItem value="failed">Failed</SelectItem>
             <SelectItem value="cancelled">Cancelled</SelectItem>
+            <SelectItem value="dead_letter">Dead letter</SelectItem>
           </SelectContent>
         </Select>
         <Select value={agentFilter} onValueChange={(v) => setParam("agent", v)}>

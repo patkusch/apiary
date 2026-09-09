@@ -139,6 +139,7 @@ export {
   useCancelTask,
   useCreateTask,
   usePauseTask,
+  useRequeueTask,
   useResumeTask,
   useTask,
   useTaskContext,

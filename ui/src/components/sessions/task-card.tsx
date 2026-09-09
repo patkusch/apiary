@@ -90,6 +90,7 @@ const SHOW_STATUS_PILL = new Set<string>([
   "pending",
   "failed",
   "cancelled",
+  "dead_letter",
   "paused",
   "reviewing",
   "offered",
@@ -133,7 +134,10 @@ export function TaskCard({
   const resumeTask = useResumeTask();
 
   const isTerminal =
-    task.status === "completed" || task.status === "failed" || task.status === "cancelled";
+    task.status === "completed" ||
+    task.status === "failed" ||
+    task.status === "cancelled" ||
+    task.status === "dead_letter";
   const canCancel = !isTerminal && task.status !== "paused";
   const canPause = task.status === "in_progress";
   const canResume = task.status === "paused";
@@ -196,7 +200,8 @@ export function TaskCard({
                 children finish), so the start time alone is misleading. */}
             {(task.status === "completed" ||
               task.status === "failed" ||
-              task.status === "cancelled") &&
+              task.status === "cancelled" ||
+              task.status === "dead_letter") &&
             task.lastUpdatedAt &&
             task.lastUpdatedAt !== task.createdAt ? (
               <>
@@ -366,13 +371,19 @@ export function TaskOutcome({
 }) {
   fallbackLines = fallbackLines ?? [];
   if (
-    (task.status === "failed" || task.status === "cancelled") &&
+    (task.status === "failed" || task.status === "cancelled" || task.status === "dead_letter") &&
     task.failureReason &&
     task.failureReason.trim().length > 0
   ) {
     return (
       <OutcomeFrame
-        label={task.status === "cancelled" ? "Cancelled" : "Failure"}
+        label={
+          task.status === "cancelled"
+            ? "Cancelled"
+            : task.status === "dead_letter"
+              ? "Dead letter"
+              : "Failure"
+        }
         text={task.failureReason}
         tone="error"
       />

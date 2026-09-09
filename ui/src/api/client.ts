@@ -278,6 +278,24 @@ class ApiClient {
     return res.json();
   }
 
+  /** The one way out of dead_letter: back to the pool with a fresh retry budget. */
+  async requeueTask(
+    id: string,
+    extraAttempts?: number,
+  ): Promise<{ success: boolean; task: TaskWithLogs }> {
+    const url = `${this.getBaseUrl()}/api/tasks/${id}/requeue`;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: this.getHeaders(),
+      body: JSON.stringify(extraAttempts ? { extraAttempts } : {}),
+    });
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({ error: "Failed to requeue task" }));
+      throw new Error(error.error || `Failed to requeue task: ${res.status}`);
+    }
+    return res.json();
+  }
+
   async pauseTask(id: string): Promise<{ success: boolean; task: TaskWithLogs }> {
     const url = `${this.getBaseUrl()}/api/tasks/${id}/pause`;
     const res = await fetch(url, {

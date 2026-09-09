@@ -66,6 +66,7 @@ const statusConfig: Record<string, StatusConfig> = {
   },
   failed: { label: "FAILED", dot: "bg-status-error", text: "text-status-error-strong" },
   cancelled: { label: "CANCELLED", dot: "bg-status-neutral", text: "text-status-neutral" },
+  dead_letter: { label: "DEAD LETTER", dot: "bg-status-error", text: "text-status-error-strong" },
 
   // Service statuses
   starting: {

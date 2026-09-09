@@ -29,7 +29,7 @@ import { cn, formatRelativeTime } from "@/lib/utils";
 import { ParallelGroup, TaskCard, TaskOutcome } from "./task-card";
 import { UserPromptBubble } from "./user-prompt-bubble";
 
-const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
+const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled", "dead_letter"]);
 
 /**
  * `true` for the orchestrator's auto-spawned review follow-ups —
