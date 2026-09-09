@@ -21,8 +21,8 @@ import {
   reclaimTaskLease,
   releaseStaleMentionProcessing,
   releaseStaleProcessingInbox,
-  timeoutExpiredApprovals,
   releaseStaleReviewingTasks,
+  timeoutExpiredApprovals,
   updateAgentStatus,
 } from "../be/db";
 import { resolveTemplate } from "../prompts/resolver";
