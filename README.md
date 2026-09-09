@@ -42,7 +42,7 @@ commit ([`1c1a5c1`](../../commit/1c1a5c1)). Everything since is this fork:
 | **Inherited** at v1.76.3 | ~300 | ~381,000 | 3,691 |
 | **Written here** (77 files touched) | 16 added, 48 modified, 13 deleted | +3,347 / −3,066 | 72 |
 
-What the 2,683 added lines actually are:
+What the 3,347 added lines actually are:
 
 - **The lease state machine** — `059_task_leases.sql`, `task-hooks.ts`, `wiring.ts`,
   and changes to `db.ts`, `heartbeat.ts`, `http/tasks.ts`, `types.ts`. Claim takes a
@@ -50,8 +50,11 @@ What the 2,683 added lines actually are:
   is a real terminal state. **21 tests.**
 - **The eval harness** — `src/eval/*`, which measures memory retrieval instead of
   asserting it. **39 tests.**
+- **Lease fencing and dead-letter surfaces** — the `store-progress` MCP tool refuses
+  a task it does not own, `dead_letter` has an API, a dashboard badge and a Requeue
+  action, and the heartbeat times out standalone approval requests. **12 tests.**
 - **Deletions** — the crypto-wallet payment scope (x402) removed entirely, which is
-  most of the 3,031 deleted lines and 3 of the deleted test files.
+  most of the 3,066 deleted lines and 3 of the deleted test files.
 
 The 3,691 inherited tests are upstream's, and I did not write them. I did make them
 pass on this fork — one of them, an order-dependent Slack mock, was failing CI and is
