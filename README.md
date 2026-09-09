@@ -8,14 +8,15 @@
 <p align="center">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="MIT License"></a>
   <img src="https://img.shields.io/badge/fork%20tests-60%20written%20here-brightgreen?style=flat-square" alt="Tests written for this fork">
-  <img src="https://img.shields.io/badge/suite-3751%20passing%20(3691%20inherited)-lightgrey?style=flat-square" alt="Full suite">
+  <img src="https://img.shields.io/badge/suite-3763%20passing%20(3691%20inherited)-lightgrey?style=flat-square" alt="Full suite">
   <img src="https://img.shields.io/badge/runtime-bun-black?style=flat-square" alt="Bun">
 </p>
 
 <p align="center">
   <sub>
-    Two numbers, deliberately. <b>60</b> tests were written for this fork — 21 for the
-    lease state machine, 39 for the eval harness. The other <b>3,691</b> came with the
+    Two numbers, deliberately. <b>72</b> tests were written for this fork — 21 for the
+    lease state machine, 39 for the eval harness, 12 for the dead-letter API, ownership
+    fencing and the approval sweep. The other <b>3,691</b> came with the
     upstream code and are inherited, not authored here.
     <a href="#what-is-inherited-and-what-is-not">Full accounting below.</a>
   </sub>
@@ -39,7 +40,7 @@ commit ([`1c1a5c1`](../../commit/1c1a5c1)). Everything since is this fork:
 | | Files | Lines | Tests |
 |---|---|---|---|
 | **Inherited** at v1.76.3 | ~300 | ~381,000 | 3,691 |
-| **Written here** (59 files touched) | 15 added, 20 modified, 24 deleted | +2,683 / −3,031 | 60 |
+| **Written here** (77 files touched) | 16 added, 48 modified, 13 deleted | +3,347 / −3,066 | 72 |
 
 What the 2,683 added lines actually are:
 
@@ -54,7 +55,7 @@ What the 2,683 added lines actually are:
 
 The 3,691 inherited tests are upstream's, and I did not write them. I did make them
 pass on this fork — one of them, an order-dependent Slack mock, was failing CI and is
-fixed in [`69027d1`](../../commit/69027d1). Run `bun test` and you should see 3751
+fixed in [`69027d1`](../../commit/69027d1). Run `bun test` and you should see 3763
 pass, 0 fail.
 
 ## The failure mode this exists to solve
