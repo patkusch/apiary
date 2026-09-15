@@ -280,8 +280,9 @@ observes, but neither kills an operating system process running a real agent.
 **`dead_letter` is reachable, but only just.** `GET /api/dead-letter-tasks` lists
 parked tasks, `POST /api/tasks/{id}/requeue` is the one way back to the pool, and
 the dashboard now shows the status, filters on it, and offers Requeue behind a
-confirmation on the task page. The UI change was verified by building it, not
-by running it against a live swarm.
+confirmation on the task page. The whole flow is now exercised end to end:
+`bun run e2e:dead-letter` runs in CI, starting a real server where a crashing
+worker gets its task dead-lettered, requeued and picked up again.
 
 **sqlite-vec does not load on macOS or CI.** Both print `sqlite-vec not
 available, falling back to in-memory cosine`, so every similarity search runs the

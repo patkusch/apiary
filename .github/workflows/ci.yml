@@ -68,6 +68,12 @@ jobs:
           path: junit.xml
           if-no-files-found: warn
 
+      # Starts the real API server and drives a task into dead_letter through
+      # /api/poll and the heartbeat, requeues it with the dashboard's request,
+      # and checks a worker gets it again. Also checks the approval timeout.
+      - name: Dead-letter flow end to end
+        run: bun run e2e:dead-letter
+
   memory-eval:
     name: Memory Retrieval Eval
     runs-on: ubuntu-latest

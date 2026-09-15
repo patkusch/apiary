@@ -66,6 +66,7 @@
     "deploy:update": "bun deploy/update.ts",
     "deploy:uninstall": "bun deploy/uninstall.ts",
     "deploy:docker": "bun deploy/docker-push.ts",
+    "e2e:dead-letter": "bun scripts/e2e-dead-letter.ts",
     "e2e:workflows": "bun scripts/e2e-workflow-test.ts",
     "e2e:workflows:docker": "bun scripts/e2e-workflow-test.ts --with-docker",
     "docs:mcp": "bun scripts/generate-mcp-docs.ts",
