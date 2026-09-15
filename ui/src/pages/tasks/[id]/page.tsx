@@ -80,7 +80,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { formatDurationMs } from "@/lib/format-duration-ms";
 import { formatTokens } from "@/lib/format-tokens";
 import { progressBarTone } from "@/lib/percent-progress-tone";
-import { statusTextClass } from "@/lib/status-tone";
+import { failureSectionTitle, statusTextClass } from "@/lib/status-tone";
 import { cn, formatRelativeTime, formatSmartTime, normalizeNewlines } from "@/lib/utils";
 
 function logDotColor(eventType: string, newValue?: string): string {
@@ -768,7 +768,7 @@ export default function TaskDetailPage() {
       {isFailed && task.failureReason && (
         <CollapsibleSection
           variant="card"
-          title={task.status === "dead_letter" ? "Dead-lettered" : "Failure Reason"}
+          title={failureSectionTitle(task.status)}
           icon={AlertTriangle}
           iconColor="text-status-error"
           borderColor="border-status-error/30"
@@ -1039,7 +1039,7 @@ export default function TaskDetailPage() {
             {isFailed && task.failureReason && (
               <CollapsibleSection
                 variant="card"
-                title="Failure Reason"
+                title={failureSectionTitle(task.status)}
                 icon={AlertTriangle}
                 iconColor="text-status-error"
                 borderColor="border-status-error/30"

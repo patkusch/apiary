@@ -28,3 +28,12 @@ export function statusTextClass(status: string | null | undefined): string {
       return "text-primary";
   }
 }
+
+/**
+ * Heading for the card that shows why a task stopped. A dead-lettered task did
+ * not fail once: its worker's lease lapsed on every attempt, so it says so.
+ * The task page renders this card in two layouts; both must use this.
+ */
+export function failureSectionTitle(status: string | null | undefined): string {
+  return status === "dead_letter" ? "Dead-lettered" : "Failure Reason";
+}

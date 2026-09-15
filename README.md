@@ -7,15 +7,15 @@
 
 <p align="center">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="MIT License"></a>
-  <img src="https://img.shields.io/badge/fork%20tests-60%20written%20here-brightgreen?style=flat-square" alt="Tests written for this fork">
-  <img src="https://img.shields.io/badge/suite-3763%20passing%20(3691%20inherited)-lightgrey?style=flat-square" alt="Full suite">
+  <img src="https://img.shields.io/badge/fork%20tests-75%20written%20here-brightgreen?style=flat-square" alt="Tests written for this fork">
+  <img src="https://img.shields.io/badge/suite-3766%20passing%20(3691%20inherited)-lightgrey?style=flat-square" alt="Full suite">
   <img src="https://img.shields.io/badge/runtime-bun-black?style=flat-square" alt="Bun">
 </p>
 
 <p align="center">
   <sub>
-    Two numbers, deliberately. <b>72</b> tests were written for this fork — 21 for the
-    lease state machine, 39 for the eval harness, 12 for the dead-letter API, ownership
+    Two numbers, deliberately. <b>75</b> tests were written for this fork — 21 for the
+    lease state machine, 39 for the eval harness, 15 for the dead-letter API, ownership
     fencing and the approval sweep. The other <b>3,691</b> came with the
     upstream code and are inherited, not authored here.
     <a href="#what-is-inherited-and-what-is-not">Full accounting below.</a>
@@ -40,7 +40,7 @@ commit ([`1c1a5c1`](../../commit/1c1a5c1)). Everything since is this fork:
 | | Files | Lines | Tests |
 |---|---|---|---|
 | **Inherited** at v1.76.3 | ~300 | ~381,000 | 3,691 |
-| **Written here** (77 files touched) | 16 added, 48 modified, 13 deleted | +3,347 / −3,066 | 72 |
+| **Written here** (77 files touched) | 16 added, 48 modified, 13 deleted | +3,347 / −3,066 | 75 |
 
 What the 3,347 added lines actually are:
 
@@ -52,13 +52,13 @@ What the 3,347 added lines actually are:
   asserting it. **39 tests.**
 - **Lease fencing and dead-letter surfaces** — the `store-progress` MCP tool refuses
   a task it does not own, `dead_letter` has an API, a dashboard badge and a Requeue
-  action, and the heartbeat times out standalone approval requests. **12 tests.**
+  action, and the heartbeat times out standalone approval requests. **15 tests.**
 - **Deletions** — the crypto-wallet payment scope (x402) removed entirely, which is
   most of the 3,066 deleted lines and 3 of the deleted test files.
 
 The 3,691 inherited tests are upstream's, and I did not write them. I did make them
 pass on this fork — one of them, an order-dependent Slack mock, was failing CI and is
-fixed in [`69027d1`](../../commit/69027d1). Run `bun test` and you should see 3763
+fixed in [`69027d1`](../../commit/69027d1). Run `bun test` and you should see 3766
 pass, 0 fail.
 
 ## The failure mode this exists to solve
