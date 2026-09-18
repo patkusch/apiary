@@ -74,6 +74,49 @@ jobs:
       - name: Dead-letter flow end to end
         run: bun run e2e:dead-letter
 
+  # Its own job so it runs beside the others instead of after them. Builds the
+  # dashboard, starts the real API server, parks a task in dead_letter, and
+  # clicks Requeue in headless Chromium. The Playwright trace and screenshot are
+  # uploaded only when it fails.
+  dashboard-e2e:
+    name: Dashboard End to End
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # The browser download is cached by Playwright version. The system
+      # libraries Chromium needs are not part of that cache, so the install
+      # step below still runs and only skips the download on a hit.
+      - name: Cache Playwright browser
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Dashboard flow end to end
+        run: bun run e2e:dashboard
+
+      - name: Upload Playwright trace and screenshot
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-trace
+          path: test-results/dashboard
+          if-no-files-found: warn
+
   memory-eval:
     name: Memory Retrieval Eval
     runs-on: ubuntu-latest

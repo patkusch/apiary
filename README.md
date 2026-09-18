@@ -283,6 +283,9 @@ the dashboard now shows the status, filters on it, and offers Requeue behind a
 confirmation on the task page. The whole flow is now exercised end to end:
 `bun run e2e:dead-letter` runs in CI, starting a real server where a crashing
 worker gets its task dead-lettered, requeued and picked up again.
+`bun run e2e:dashboard` repeats it through the dashboard in headless Chromium,
+clicking the Requeue button, so a broken button or heading fails the build (run
+`npx playwright install chromium` once first).
 
 **sqlite-vec does not load on macOS or CI.** Both print `sqlite-vec not
 available, falling back to in-memory cosine`, so every similarity search runs the
@@ -292,7 +295,8 @@ brute-force O(n) path and the eval figures above measure the fallback.
 orphan an existing database on next start, so it has been left alone.
 
 **Inherited and unverified.** Not run by me: the Docker lead and worker images,
-the dashboard UI, and `apiary eval --provider openai`. `package.json` declares
+the dashboard UI beyond the dead-letter flow that CI clicks through, and
+`apiary eval --provider openai`. `package.json` declares
 `bun >=1.0.26`; the only version this has run on is 1.4.0. Dependencies use caret
 ranges, so reproducibility depends on the committed `bun.lock` with
 `--frozen-lockfile`.

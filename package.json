@@ -54,8 +54,8 @@
     "start:portless": "portless api.swarm bun src/http.ts",
     "inspector": "bunx @modelcontextprotocol/inspector --transport stdio bun src/stdio.ts",
     "inspector:http": "bunx @modelcontextprotocol/inspector --transport http https://api.swarm.localhost:1355/mcp",
-    "lint": "biome check src",
-    "lint:fix": "biome check --write src",
+    "lint": "biome check src e2e",
+    "lint:fix": "biome check --write src e2e",
     "format": "biome format --write src",
     "build:binary": "bun build ./src/cli.tsx --compile --target=bun-linux-x64 --outfile ./dist/apiary",
     "build:binary:arm64": "bun build ./src/cli.tsx --compile --target=bun-linux-arm64 --outfile ./dist/apiary",
@@ -67,6 +67,8 @@
     "deploy:uninstall": "bun deploy/uninstall.ts",
     "deploy:docker": "bun deploy/docker-push.ts",
     "e2e:dead-letter": "bun scripts/e2e-dead-letter.ts",
+    "build:dashboard": "cd ui && npx --yes pnpm@10 install --frozen-lockfile && npx --yes pnpm@10 run build",
+    "e2e:dashboard": "bun run build:dashboard && playwright test --config e2e/dashboard/playwright.config.ts",
     "e2e:workflows": "bun scripts/e2e-workflow-test.ts",
     "e2e:workflows:docker": "bun scripts/e2e-workflow-test.ts --with-docker",
     "docs:mcp": "bun scripts/generate-mcp-docs.ts",
@@ -84,6 +86,7 @@
     "@biomejs/biome": "^2.3.10",
     "@faker-js/faker": "^10.4.0",
     "@opencode-ai/plugin": "1.14.30",
+    "@playwright/test": "^1.63.0",
     "@types/bun": "latest"
   },
   "peerDependencies": {

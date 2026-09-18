@@ -73,6 +73,7 @@ docker-compose.desplega.yaml
 
 # Test reports
 junit.xml
+test-results/
 
 # apiary eval throwaway databases
 .apiary-eval-*.sqlite*
