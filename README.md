@@ -1,26 +1,74 @@
-<h1 align="center">apiary</h1>
+<div align="center">
 
-<p align="center">
-  <b>Durable multi-agent orchestration for coding agents.</b><br/>
-  <sub>Leased tasks. Bounded retries. No work lost when a worker dies.</sub>
-</p>
+# apiary
 
-<p align="center">
-  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="MIT License"></a>
-  <img src="https://img.shields.io/badge/fork%20tests-75%20written%20here-brightgreen?style=flat-square" alt="Tests written for this fork">
-  <img src="https://img.shields.io/badge/suite-3766%20passing%20(3691%20inherited)-lightgrey?style=flat-square" alt="Full suite">
-  <img src="https://img.shields.io/badge/runtime-bun-black?style=flat-square" alt="Bun">
-</p>
+### Keeps a team of AI coding agents working when one of them crashes
 
-<p align="center">
-  <sub>
-    Two numbers, deliberately. <b>75</b> tests were written for this fork — 21 for the
-    lease state machine, 39 for the eval harness, 15 for the dead-letter API, ownership
-    fencing and the approval sweep. The other <b>3,691</b> came with the
-    upstream code and are inherited, not authored here.
-    <a href="#what-is-inherited-and-what-is-not">Full accounting below.</a>
-  </sub>
-</p>
+**A worker takes a task and dies halfway through. The code this was forked from called the task failed and moved on.**
+**apiary hands it to another worker, and after three failed tries parks it for a person to decide.**
+
+<br/>
+
+[![The dashboard's dead-letter list, with one task waiting for a person](./docs/hero.png)](#the-thirty-second-version)
+
+**A real run.** A task that ran out of tries, waiting in the dashboard's Dead letter list.
+[The thirty-second version](#the-thirty-second-version) · [Run it yourself](#quick-start)
+
+<br/>
+
+[![Runtime](https://img.shields.io/badge/Bun-1A1A1A?style=for-the-badge&logo=bun&logoColor=white)](https://bun.sh)
+[![License](https://img.shields.io/badge/License-MIT-1A1A1A?style=for-the-badge)](./LICENSE)
+[![Tests](https://img.shields.io/badge/tests-3766_passing-2ea043?style=for-the-badge)](#what-is-inherited-and-what-is-not)
+[![Written here](https://img.shields.io/badge/written_for_this_fork-75-1A1A1A?style=for-the-badge)](#what-is-inherited-and-what-is-not)
+[![CI](https://img.shields.io/github/actions/workflow/status/patkusch/apiary/ci.yml?branch=main&style=for-the-badge&label=CI)](https://github.com/patkusch/apiary/actions/workflows/ci.yml)
+
+<sub>Two test numbers, deliberately: 75 tests were written for this fork and the other 3,691 came with the code it grew from. <a href="#what-is-inherited-and-what-is-not">Full accounting below.</a></sub>
+
+</div>
+
+---
+
+## The thirty-second version
+
+A team of AI coding agents takes jobs from one shared list. Two stand-in workers, worker-a and worker-b, ask apiary for work. To keep the run short, a worker that stays silent for 1.5 seconds loses its task, and the server checks once a second. The real settings are 10 minutes and 90 seconds.
+
+The first job is "Rename the old config flag everywhere". worker-a takes it, then stops answering, the way a crashed program does.
+
+```
+task df005f93  "Rename the old config flag everywhere"
++ 0.3s  unassigned    attempts 0 of 3  in the pool, nobody has it yet
++ 0.6s  in_progress   attempts 1 of 3  worker-a has it
++ 2.4s  unassigned    attempts 1 of 3  worker-a went quiet, so it went back to the pool
++ 3.4s  in_progress   attempts 2 of 3  worker-b has it
++ 3.7s  completed     attempts 2 of 3  worker-b finished it
+```
+
+The job did not vanish. It kept its number, went back to the pool (the shared list of waiting jobs), and worker-b finished it on the second try.
+
+The second job, "Regenerate the March invoices", makes every worker that takes it go silent. apiary gives it three tries and then stops instead of trying forever.
+
+```
+task d8342cbc  "Regenerate the March invoices"
++ 3.7s  unassigned    attempts 0 of 3  in the pool, nobody has it yet
++ 4.0s  in_progress   attempts 1 of 3  worker-a has it
++ 5.5s  in_progress   attempts 2 of 3  worker-b has it
++ 7.3s  unassigned    attempts 2 of 3  worker-b went quiet, so it went back to the pool
++ 8.5s  in_progress   attempts 3 of 3  worker-b has it
++10.3s  dead_letter   attempts 3 of 3  parked, waiting for a person
++10.3s  GET /api/dead-letter-tasks -> 1 task waiting: d8342cbc
+```
+
+`dead_letter` is a parking place for jobs that ran out of tries. Nothing picks them up on its own. That is the list in the picture above.
+
+A person looks at the job, fixes the cause, and clicks Requeue in the dashboard. The dashboard asks first, then the job goes back to the pool with a fresh set of tries, and a worker takes it again.
+
+```
++12.5s  dashboard asks "Requeue Task": This task exhausted its retry budget (3 of 3 attempts). Requeueing returns it to the pool with a fresh budget, so a worker will pick it up again. Do this only if the cause has been fixed.
++12.8s  unassigned    attempts 3 of 6  a person requeued it, back in the pool with a fresh budget
++13.4s  in_progress   attempts 4 of 6  worker-b has it
+```
+
+**Real output, captured from `bun docs/make_hero.ts`.** It starts the real server and the real dashboard, and the picture above is a screenshot of that dashboard from the same run. The task numbers and times change on every run. The two workers are stand-ins that talk to the server over its web API and stop answering. No operating-system process is killed, which the [known limitations](#known-limitations) say plainly. It needs Bun and, once, `npx playwright install chromium`.
 
 ---
 
@@ -63,8 +111,8 @@ pass, 0 fail.
 
 ## The failure mode this exists to solve
 
-A worker picks up a task. Halfway through, its process dies, or you deploy and
-the server restarts.
+When a worker's process dies, or you deploy and the server restarts, the task it
+was holding is at risk.
 
 Upstream marked that task `failed` and moved on. There was no lease, no attempt
 counter and no requeue path, so the in-flight work was gone and nothing retried
