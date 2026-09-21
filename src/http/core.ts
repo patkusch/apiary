@@ -7,6 +7,7 @@ import {
   getInjectableGlobalConfigs,
   getRecentlyCancelledTasksForAgent,
   getTaskById,
+  markAgentAlive,
   shouldBlockPolling,
   updateAgentStatus,
 } from "../be/db";
@@ -388,6 +389,8 @@ export async function handleCore(
       }
 
       updateAgentStatus(agent.id, status);
+      // A ping is the worker saying it is there, so it may be given work again.
+      markAgentAlive(agent.id);
 
       return true;
     });

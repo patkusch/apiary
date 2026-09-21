@@ -566,6 +566,8 @@ type AgentRow = {
   harness_provider: string | null;
   /** Migration 055: worker-self-reported credential snapshot (JSON of AgentCredStatus). NULL = unreported. */
   cred_status: string | null;
+  /** Migration 060: when this worker last lost a task lease. NULL until it does, and again once it shows it is alive. */
+  leaseLostAt: string | null;
 };
 
 function rowToAgent(row: AgentRow): Agent {
@@ -594,6 +596,7 @@ function rowToAgent(row: AgentRow): Agent {
       ? (JSON.parse(row.credentialMissing) as string[])
       : null,
     credStatus: row.cred_status ? (JSON.parse(row.cred_status) as AgentCredStatus) : null,
+    leaseLostAt: row.leaseLostAt ?? undefined,
   };
 }
 
@@ -2486,6 +2489,17 @@ export function clearTaskLease(taskId: string): void {
     .run(taskId);
 }
 
+/**
+ * A worker has shown it is alive (a ping, a poll, or registering again), so it
+ * counts as a healthy idle worker again. Does nothing unless the worker had lost
+ * a lease, so it is cheap to call on every ping and poll.
+ */
+export function markAgentAlive(agentId: string): void {
+  getDb()
+    .prepare("UPDATE agents SET leaseLostAt = NULL WHERE id = ? AND leaseLostAt IS NOT NULL")
+    .run(agentId);
+}
+
 export type ReclaimedTask = {
   taskId: string;
   previousOwnerId: string | null;
@@ -2513,10 +2527,16 @@ export function reclaimExpiredTaskLeases(nowMs: number = Date.now()): ReclaimedT
 
   const expired = database
     .prepare<
-      { id: string; leaseOwnerId: string | null; attempts: number; maxAttempts: number },
+      {
+        id: string;
+        agentId: string | null;
+        leaseOwnerId: string | null;
+        attempts: number;
+        maxAttempts: number;
+      },
       [string]
     >(
-      `SELECT id, leaseOwnerId, attempts, maxAttempts FROM agent_tasks
+      `SELECT id, agentId, leaseOwnerId, attempts, maxAttempts FROM agent_tasks
        WHERE status = 'in_progress' AND leaseExpiresAt IS NOT NULL AND leaseExpiresAt < ?`,
     )
     .all(now);
@@ -2554,6 +2574,15 @@ export function reclaimExpiredTaskLeases(nowMs: number = Date.now()): ReclaimedT
              WHERE id = ? AND status = 'in_progress'`,
           )
           .run(now, task.id);
+      }
+
+      // The worker that held the lease has not been heard from, so it must not be
+      // offered work (this task included) until it shows it is alive again. Tasks
+      // claimed before the lease migration carry no lease owner; fall back to the
+      // agent the task was assigned to.
+      const lostBy = task.leaseOwnerId ?? task.agentId;
+      if (lostBy) {
+        database.prepare("UPDATE agents SET leaseLostAt = ? WHERE id = ?").run(now, lostBy);
       }
 
       reclaimed.push({
@@ -5766,14 +5795,19 @@ export function getStalledInProgressTasks(thresholdMinutes: number = 30): AgentT
 }
 
 /**
- * Get idle, non-lead, non-offline agents that have capacity for more tasks.
- * Used by the heartbeat for auto-assignment of pool tasks.
+ * Get idle, non-lead, non-offline agents that have capacity for more tasks, in
+ * registration order. Used by the heartbeat for auto-assignment of pool tasks.
+ *
+ * A worker that lost a task lease and has not been heard from since is left out,
+ * even if its status still says idle: it is the one that just failed to finish
+ * the work, and it may not be there at all.
  */
 export function getIdleWorkersWithCapacity(): Agent[] {
   const agents = getDb()
     .prepare<AgentRow, []>(
       `SELECT * FROM agents
-       WHERE status = 'idle' AND isLead = 0`,
+       WHERE status = 'idle' AND isLead = 0 AND leaseLostAt IS NULL
+       ORDER BY rowid`,
     )
     .all()
     .map(rowToAgent);

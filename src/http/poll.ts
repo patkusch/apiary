@@ -20,6 +20,7 @@ import {
   getUnassignedTaskIds,
   getUserById,
   hasCapacity,
+  markAgentAlive,
   recordBudgetRefusalNotification,
   startTask,
   upsertChannelActivityCursor,
@@ -153,6 +154,10 @@ export async function handlePoll(
         if (!agent) {
           return { error: "Agent not found", status: 404 };
         }
+
+        // Asking for work is proof the worker is alive, so a worker that lost a
+        // task lease may be given work again from here on.
+        markAgentAlive(myAgentId);
 
         // Check for offered tasks first (highest priority for both workers and leads)
         // Atomically claim the task for review to prevent duplicate processing

@@ -5,7 +5,8 @@
  *
  * The story, with two stand-in workers that talk to the server over HTTP:
  *   1. worker-a takes a task and goes silent. The server notices, puts the
- *      task back in the pool, and worker-b finishes it.
+ *      task back in the pool, and worker-b finishes it. worker-a is first in
+ *      registration order, and is still passed over.
  *   2. A second task kills every worker that touches it. After three tries
  *      it is parked in the dead-letter list.
  *   3. The screenshot is taken with that task waiting in the list.
@@ -123,11 +124,11 @@ async function main() {
 
   const { stop } = await startStack();
   try {
-    // The server hands a returned task to the first idle worker it finds, in
-    // registration order. worker-b registers first so the task that worker-a
-    // drops goes to worker-b.
-    const b = await register("worker-b");
+    // worker-a registers first, so it is first in line for any task in the pool.
+    // When it goes silent the server still passes it over: a worker that just
+    // lost a task is not offered work again until it is heard from.
     const a = await register("worker-a");
+    const b = await register("worker-b");
     console.log(
       "A worker that stays silent for 1.5 seconds loses its task. The server checks once a second.\n",
     );
@@ -165,17 +166,16 @@ async function main() {
     const poisonText = "Regenerate the March invoices";
     const poison = await createTask(poisonText);
     console.log(`\ntask ${poison.slice(0, 8)}  "${poisonText}"`);
-    let polled = false;
-    const parked = await follow(
-      poison,
-      (t) => t.status === "dead_letter",
-      async () => {
-        if (!polled) {
-          await api("/api/poll", {}, a);
-          polled = true;
-        }
-      },
-    );
+    // Each time the task is back in the pool, a worker comes back, asks for
+    // work, takes it and goes silent again, as a crashing worker restarted by
+    // its supervisor does. The server does not hand a task to a worker it has
+    // not heard from since it lost a task, so without this nobody would ask.
+    const comeBackAndAsk = async () => {
+      const t = (await getTask(poison)) as Seen;
+      // The worker that did not take it last time is the one that comes back.
+      if (t.status === "unassigned") await api("/api/poll", {}, t.attempts % 2 === 0 ? a : b);
+    };
+    const parked = await follow(poison, (t) => t.status === "dead_letter", comeBackAndAsk);
     const listed = (await (await api("/api/dead-letter-tasks")).json()) as { tasks: Seen[] };
     say(
       `GET /api/dead-letter-tasks -> ${listed.tasks.length} task waiting: ${listed.tasks.map((t) => t.id.slice(0, 8)).join(", ")}`,
@@ -245,7 +245,7 @@ async function main() {
     const again = await follow(
       poison,
       (t) => t.status !== "dead_letter" && t.attempts > parked.attempts,
-      undefined,
+      comeBackAndAsk,
       parked as Seen,
     );
     void again;

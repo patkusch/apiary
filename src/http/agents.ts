@@ -9,6 +9,7 @@ import {
   getAllAgentsWithTasks,
   getDb,
   getSwarmConfigs,
+  markAgentAlive,
   resetEmptyPollCount,
   setAgentHarnessProvider,
   updateAgentActivity,
@@ -248,6 +249,8 @@ export async function handleAgentRegister(
         if (existingAgent.status === "offline") {
           updateAgentStatus(existingAgent.id, "idle");
         }
+        // Registering again is a sign of life: a restarted worker may be given work.
+        markAgentAlive(existingAgent.id);
         if (parsed.body.maxTasks !== undefined && parsed.body.maxTasks !== existingAgent.maxTasks) {
           updateAgentMaxTasks(existingAgent.id, parsed.body.maxTasks);
         }

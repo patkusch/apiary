@@ -18,11 +18,11 @@
 
 [![Runtime](https://img.shields.io/badge/Bun-1A1A1A?style=for-the-badge&logo=bun&logoColor=white)](https://bun.sh)
 [![License](https://img.shields.io/badge/License-MIT-1A1A1A?style=for-the-badge)](./LICENSE)
-[![Tests](https://img.shields.io/badge/tests-3766_passing-2ea043?style=for-the-badge)](#what-is-inherited-and-what-is-not)
-[![Written here](https://img.shields.io/badge/written_for_this_fork-75-1A1A1A?style=for-the-badge)](#what-is-inherited-and-what-is-not)
+[![Tests](https://img.shields.io/badge/tests-3781_passing-2ea043?style=for-the-badge)](#what-is-inherited-and-what-is-not)
+[![Written here](https://img.shields.io/badge/written_for_this_fork-90-1A1A1A?style=for-the-badge)](#what-is-inherited-and-what-is-not)
 [![CI](https://img.shields.io/github/actions/workflow/status/patkusch/apiary/ci.yml?branch=main&style=for-the-badge&label=CI)](https://github.com/patkusch/apiary/actions/workflows/ci.yml)
 
-<sub>Two test numbers, deliberately: 75 tests were written for this fork and the other 3,691 came with the code it grew from. <a href="#what-is-inherited-and-what-is-not">Full accounting below.</a></sub>
+<sub>Two test numbers, deliberately: 90 tests were written for this fork and the other 3,691 came with the code it grew from. <a href="#what-is-inherited-and-what-is-not">Full accounting below.</a></sub>
 
 </div>
 
@@ -32,40 +32,40 @@
 
 A team of AI coding agents takes jobs from one shared list. Two stand-in workers, worker-a and worker-b, ask apiary for work. To keep the run short, a worker that stays silent for 1.5 seconds loses its task, and the server checks once a second. The real settings are 10 minutes and 90 seconds.
 
-The first job is "Rename the old config flag everywhere". worker-a takes it, then stops answering, the way a crashed program does.
+The first job is "Rename the old config flag everywhere". worker-a takes it, then stops answering, the way a crashed program does. worker-a is first in line for new work, and the server still skips it: a worker that just lost a job is not given work again until it is heard from.
 
 ```
-task df005f93  "Rename the old config flag everywhere"
+task a224a679  "Rename the old config flag everywhere"
 + 0.3s  unassigned    attempts 0 of 3  in the pool, nobody has it yet
 + 0.6s  in_progress   attempts 1 of 3  worker-a has it
-+ 2.4s  unassigned    attempts 1 of 3  worker-a went quiet, so it went back to the pool
++ 2.5s  unassigned    attempts 1 of 3  worker-a went quiet, so it went back to the pool
 + 3.4s  in_progress   attempts 2 of 3  worker-b has it
 + 3.7s  completed     attempts 2 of 3  worker-b finished it
 ```
 
 The job did not vanish. It kept its number, went back to the pool (the shared list of waiting jobs), and worker-b finished it on the second try.
 
-The second job, "Regenerate the March invoices", makes every worker that takes it go silent. apiary gives it three tries and then stops instead of trying forever.
+The second job, "Regenerate the March invoices", makes every worker that takes it go silent. Each time it goes back to the pool, a worker comes back and asks for work, the way a crashed program restarted by its supervisor does. apiary gives the job three tries and then stops instead of trying forever.
 
 ```
-task d8342cbc  "Regenerate the March invoices"
+task 5192b623  "Regenerate the March invoices"
 + 3.7s  unassigned    attempts 0 of 3  in the pool, nobody has it yet
 + 4.0s  in_progress   attempts 1 of 3  worker-a has it
 + 5.5s  in_progress   attempts 2 of 3  worker-b has it
 + 7.3s  unassigned    attempts 2 of 3  worker-b went quiet, so it went back to the pool
-+ 8.5s  in_progress   attempts 3 of 3  worker-b has it
-+10.3s  dead_letter   attempts 3 of 3  parked, waiting for a person
-+10.3s  GET /api/dead-letter-tasks -> 1 task waiting: d8342cbc
++ 7.6s  in_progress   attempts 3 of 3  worker-a has it
++ 9.5s  dead_letter   attempts 3 of 3  parked, waiting for a person
++ 9.5s  GET /api/dead-letter-tasks -> 1 task waiting: 5192b623
 ```
 
 `dead_letter` is a parking place for jobs that ran out of tries. Nothing picks them up on its own. That is the list in the picture above.
 
-A person looks at the job, fixes the cause, and clicks Requeue in the dashboard. The dashboard asks first, then the job goes back to the pool with a fresh set of tries, and a worker takes it again.
+A person looks at the job, fixes the cause, and clicks Requeue in the dashboard. The dashboard asks first, then the job goes back to the pool with a fresh set of tries, and the next worker to ask for work takes it.
 
 ```
-+12.5s  dashboard asks "Requeue Task": This task exhausted its retry budget (3 of 3 attempts). Requeueing returns it to the pool with a fresh budget, so a worker will pick it up again. Do this only if the cause has been fixed.
-+12.8s  unassigned    attempts 3 of 6  a person requeued it, back in the pool with a fresh budget
-+13.4s  in_progress   attempts 4 of 6  worker-b has it
++11.7s  dashboard asks "Requeue Task": This task exhausted its retry budget (3 of 3 attempts). Requeueing returns it to the pool with a fresh budget, so a worker will pick it up again. Do this only if the cause has been fixed.
++12.0s  unassigned    attempts 3 of 6  a person requeued it, back in the pool with a fresh budget
++12.3s  in_progress   attempts 4 of 6  worker-b has it
 ```
 
 **Real output, captured from `bun docs/make_hero.ts`.** It starts the real server and the real dashboard, and the picture above is a screenshot of that dashboard from the same run. The task numbers and times change on every run. The two workers are stand-ins that talk to the server over its web API and stop answering. No operating-system process is killed, which the [known limitations](#known-limitations) say plainly. It needs Bun and, once, `npx playwright install chromium`.
@@ -88,7 +88,7 @@ commit ([`1c1a5c1`](../../commit/1c1a5c1)). Everything since is this fork:
 | | Files | Lines | Tests |
 |---|---|---|---|
 | **Inherited** at v1.76.3 | ~300 | ~381,000 | 3,691 |
-| **Written here** (77 files touched) | 16 added, 48 modified, 13 deleted | +3,347 / −3,066 | 75 |
+| **Written here** (77 files touched) | 16 added, 48 modified, 13 deleted | +3,347 / −3,066 | 90 |
 
 What the 3,347 added lines actually are:
 
@@ -101,12 +101,16 @@ What the 3,347 added lines actually are:
 - **Lease fencing and dead-letter surfaces** — the `store-progress` MCP tool refuses
   a task it does not own, `dead_letter` has an API, a dashboard badge and a Requeue
   action, and the heartbeat times out standalone approval requests. **15 tests.**
+- **Lost-lease workers are passed over** — a worker whose lease just expired is not
+  handed the same task again, or any other, until it is heard from. `060_agent_lease_lost.sql`
+  plus small changes to `db.ts`, the heartbeat, `/ping`, `/api/poll` and registration.
+  **15 tests.**
 - **Deletions** — the crypto-wallet payment scope (x402) removed entirely, which is
   most of the 3,066 deleted lines and 3 of the deleted test files.
 
 The 3,691 inherited tests are upstream's, and I did not write them. I did make them
 pass on this fork — one of them, an order-dependent Slack mock, was failing CI and is
-fixed in [`69027d1`](../../commit/69027d1). Run `bun test` and you should see 3766
+fixed in [`69027d1`](../../commit/69027d1). Run `bun test` and you should see 3781
 pass, 0 fail.
 
 ## The failure mode this exists to solve
@@ -311,6 +315,22 @@ real numbers. `--min-hit-at 3=0.6` gates CI.
 ## Known limitations
 
 Confirmed in the code or by running it. Nothing here is speculative.
+
+**A silent worker is passed over, but only until it says anything.** It used to be
+that when a worker went silent and its task went back to the pool, the server still
+saw that worker as free, and handed it the task again if it was first in line. A
+crashed worker cannot take the task, so that try was wasted, and a task could lose
+one of its three tries without another worker ever seeing it. Now the server marks a
+worker whose lease just ran out (`leaseLostAt`) and gives it no work until its next
+`/ping`, `/api/poll` or registration, so the task goes to another worker. A single
+worker is not stranded: the task waits in the pool and goes to it the moment it
+answers. If every worker is silent the task waits and uses up no tries. Two limits
+remain. A worker that is broken but still pings, for example one whose agent is
+stuck while its program keeps answering, counts as alive and can be handed the task
+again. And a worker that comes back, or pings, right after losing its lease is
+trusted straight away, even when it is first in line, because the server cannot tell
+a restarted worker from one that will fail again; the three-try limit is what bounds
+that.
 
 **Lease renewal is hook-driven, not timed.** Renewal rides on the `PostToolUse`
 hook, so the cadence is however often the agent calls a tool. A worker inside one

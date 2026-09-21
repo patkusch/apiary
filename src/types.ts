@@ -369,6 +369,11 @@ export const AgentSchema = z.object({
     .nullable()
     .optional(),
 
+  // Set when the server took a task back from this worker because its lease
+  // expired. While set, the worker is not offered pool tasks. Cleared by its
+  // next /ping, /api/poll or registration. Absent when nothing is wrong.
+  leaseLostAt: z.iso.datetime().optional(),
+
   createdAt: z.iso.datetime().default(() => new Date().toISOString()),
   lastUpdatedAt: z.iso.datetime().default(() => new Date().toISOString()),
 });

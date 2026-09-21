@@ -121,7 +121,10 @@ export function preflightGate(): boolean {
   const hasReviewingTasks = stats.reviewing > 0;
 
   const onlineAgents = agents.filter((a) => a.status !== "offline");
-  const idleWorkers = onlineAgents.filter((a) => !a.isLead && a.status === "idle");
+  // A worker that just lost a lease is not a healthy idle worker until it is heard from.
+  const idleWorkers = onlineAgents.filter(
+    (a) => !a.isLead && a.status === "idle" && !a.leaseLostAt,
+  );
   const busyWorkers = onlineAgents.filter((a) => !a.isLead && a.status === "busy");
 
   // Gate conditions — if any are true, proceed with triage
