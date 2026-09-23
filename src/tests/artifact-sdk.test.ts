@@ -469,6 +469,78 @@ describe("createTunnel", () => {
   });
 });
 
+// ─── @desplega.ai/localtunnel's own handshake, against a mock server ───────
+//
+// This is the one place a dependency bump (axios inside localtunnel's own
+// Tunnel.js) is worth its own real test rather than trusting the package's
+// unit tests: Tunnel.js's _init() does a plain `axios.get(uri, { responseType:
+// 'json' })` against `opts.host`, reads `res.data` / `res.status` on success
+// and `err.response?.status` / `err.response?.data?.message` on failure —
+// nothing else. A local mock server standing in for lt.desplega.ai exercises
+// exactly that round trip, for both outcomes the code branches on.
+describe("localtunnel's handshake against a mock server", () => {
+  test("resolves with the tunnel info the mock server returns", async () => {
+    const localtunnel = (await import("@desplega.ai/localtunnel")).default as (
+      opts: Record<string, unknown>,
+    ) => Promise<{ url: string; close: () => void }>;
+
+    const server = Bun.serve({
+      port: 0,
+      fetch(req) {
+        const url = new URL(req.url);
+        if (url.pathname === "/my-subdomain") {
+          return Response.json({
+            id: "my-subdomain",
+            ip: "127.0.0.1",
+            port: 4443,
+            url: "https://my-subdomain.mock.test",
+            cached_url: "https://my-subdomain.mock.test",
+            max_conn_count: 1,
+          });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+
+    try {
+      const tunnel = await localtunnel({
+        port: 3000,
+        subdomain: "my-subdomain",
+        host: server.url.toString().replace(/\/$/, ""),
+      });
+      expect(tunnel.url).toBe("https://my-subdomain.mock.test");
+      tunnel.close();
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("a 409 from the mock server surfaces as a rejection with the server's message", async () => {
+    const localtunnel = (await import("@desplega.ai/localtunnel")).default as (
+      opts: Record<string, unknown>,
+    ) => Promise<{ url: string; close: () => void }>;
+
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        return Response.json({ message: "Subdomain is already in use" }, { status: 409 });
+      },
+    });
+
+    try {
+      await expect(
+        localtunnel({
+          port: 3000,
+          subdomain: "taken",
+          host: server.url.toString().replace(/\/$/, ""),
+        }),
+      ).rejects.toThrow("Subdomain is already in use");
+    } finally {
+      server.stop(true);
+    }
+  });
+});
+
 // ─── index.ts re-export tests ──────────────────────────────────────────
 
 describe("artifact-sdk index exports", () => {

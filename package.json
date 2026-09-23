@@ -84,7 +84,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.3.10",
-    "@faker-js/faker": "^10.4.0",
+    "@faker-js/faker": "^10.6.0",
     "@opencode-ai/plugin": "1.14.30",
     "@playwright/test": "^1.63.0",
     "@types/bun": "latest"
@@ -124,5 +124,8 @@
     "svix": "^1.62.0",
     "zod": "^4.2.1",
     "zod-to-json-schema": "^3.25.1"
+  },
+  "overrides": {
+    "axios": "^1.20.0"
   }
 }
