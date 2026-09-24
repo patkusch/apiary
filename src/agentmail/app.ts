@@ -56,7 +56,14 @@ export function verifyAgentMailWebhook(
 
   try {
     const wh = new Webhook(webhookSecret);
-    return wh.verify(rawBody, headers);
+    // svix 2.x's verify() only checks the signature and returns undefined on
+    // success — v1.x also parsed and returned the payload. Parsing is now the
+    // caller's job; do it here so this function's own contract ("returns the
+    // verified payload") stays true instead of quietly starting to return
+    // undefined, which the HTTP handler's `if (!verified)` would then reject
+    // as an invalid signature even though it verified correctly.
+    wh.verify(rawBody, headers);
+    return JSON.parse(rawBody);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.log(`[AgentMail] Signature verification failed: ${message}`);

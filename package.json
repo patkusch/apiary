@@ -121,7 +121,7 @@
     "react": "^19.2.3",
     "react-devtools-core": "^7.0.1",
     "sqlite-vec": "^0.1.9",
-    "svix": "^1.62.0",
+    "svix": "^2.5.0",
     "zod": "^4.2.1",
     "zod-to-json-schema": "^3.25.1"
   },
