@@ -1,2 +1,11 @@
 allowBuilds:
   esbuild: true
+
+overrides:
+  # dompurify/uuid/lodash-es are pulled transitively (mermaid, fumadocs deps);
+  # patched directly since their own parents don't expose a range that reaches
+  # the fix. See ui/pnpm-workspace.yaml for the mermaid-specific reasoning —
+  # mermaid itself is bumped directly here since it's already a direct dep.
+  dompurify: ^3.4.15
+  uuid: ^11.1.1
+  lodash-es: ^4.18.1
