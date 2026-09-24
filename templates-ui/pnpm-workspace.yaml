@@ -1,3 +1,21 @@
 allowBuilds:
   sharp: true
   unrs-resolver: true
+
+overrides:
+  # next's own bundled toolchain (build/lint internals, not app runtime code).
+  # Same-major patch bumps only. Two packages resolve two different major
+  # lines from different consumers, so each gets its own selector rather than
+  # a single override forcing one line onto both.
+  "@babel/core": ^7.29.7
+  "@humanfs/node": ^0.16.8
+  baseline-browser-mapping: ^2.11.25
+  "brace-expansion@1": ^1.1.21
+  "brace-expansion@5": ^5.0.12
+  browserslist: ^4.29.0
+  flatted: ^3.4.4
+  js-yaml: ^4.3.2
+  nanoid: ^3.3.19
+  "picomatch@2": ^2.3.2
+  "picomatch@4": ^4.0.7
+  postcss: ^8.5.28
