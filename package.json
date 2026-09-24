@@ -96,7 +96,7 @@
     "bun": ">=1.0.26"
   },
   "dependencies": {
-    "@ai-sdk/openai": "^3.0.41",
+    "@ai-sdk/openai": "^4.0.74",
     "@anthropic-ai/sdk": "^0.93.0",
     "@asteasolutions/zod-to-openapi": "^8.0.0",
     "@desplega.ai/business-use": "^0.4.2",
@@ -111,7 +111,7 @@
     "@opencode-ai/sdk": "^1.14.30",
     "@slack/bolt": "^4.6.0",
     "@types/react": "^19.2.7",
-    "ai": "^6.0.116",
+    "ai": "^7.0.113",
     "cron-parser": "^5.4.0",
     "date-fns": "^4.1.0",
     "hono": "^4.13.8",
