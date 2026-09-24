@@ -147,7 +147,12 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Deploy Agent Swarm
-        uses: tarasyarema/dokploy-deploy-action@main
+        # Pinned to a commit, not @main: this is a low-adoption, unversioned
+        # third-party action (no tags, no releases) that receives
+        # DOKPLOY_TOKEN. @main would let a push to someone else's repo change
+        # what runs here — with deploy-secret access — without any commit in
+        # this repo to review. SHA is main's HEAD as of 2026-09-24.
+        uses: tarasyarema/dokploy-deploy-action@7829eb138736081406180fcb1f07f0d7315a6170
         with:
           deployment_type: compose
           compose_id: h4or-knfw2HWkTzjLmrn8
