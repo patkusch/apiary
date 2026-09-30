@@ -4,8 +4,8 @@
 
 ### Keeps a team of AI coding agents working when one of them crashes
 
-**A worker takes a task and dies halfway through. The code this was forked from called the task failed and moved on.**
-**apiary hands it to another worker, and after three failed tries parks it for a person to decide.**
+**A worker can crash mid-task. The code apiary was forked from called that a failure and dropped it.**
+**apiary hands the task to the next worker instead, and only stops — for a person to decide — after three failed tries.**
 
 <br/>
 
