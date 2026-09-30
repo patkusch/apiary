@@ -6,7 +6,7 @@ overrides:
   # patched directly since their own parents don't expose a range that reaches
   # the fix. See ui/pnpm-workspace.yaml for the mermaid-specific reasoning —
   # mermaid itself is bumped directly here since it's already a direct dep.
-  dompurify: ^3.4.15
+  dompurify: ^3.4.16
   uuid: ^11.1.1
   lodash-es: ^4.18.1
   # next's own bundled toolchain, same shape as templates-ui/pnpm-workspace.yaml.
