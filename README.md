@@ -9,6 +9,7 @@
 
 <br/>
 
+[![ci](https://github.com/patkusch/apiary/actions/workflows/ci.yml/badge.svg)](https://github.com/patkusch/apiary/actions/workflows/ci.yml)
 [![The dashboard's dead-letter list, with one task waiting for a person](./docs/hero.png)](#the-thirty-second-version)
 
 **A real run.** A task that ran out of tries, waiting in the dashboard's Dead letter list.
