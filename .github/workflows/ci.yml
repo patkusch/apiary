@@ -11,6 +11,9 @@ on:
       - "docs-site/**"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   lint-and-typecheck:
     name: Lint and Type Check
