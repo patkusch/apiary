@@ -6,13 +6,13 @@ overrides:
   # patched directly since their own parents don't expose a range that reaches
   # the fix. See ui/pnpm-workspace.yaml for the mermaid-specific reasoning —
   # mermaid itself is bumped directly here since it's already a direct dep.
-  dompurify: ^3.4.16
+  dompurify: ^3.4.17
   uuid: ^11.1.1
   lodash-es: ^4.18.1
   # next's own bundled toolchain, same shape as templates-ui/pnpm-workspace.yaml.
   baseline-browser-mapping: ^2.11.25
   esbuild: ^0.28.2
-  fast-uri: ^3.1.8
+  fast-uri: ^3.1.9
   fast-xml-builder: ^1.3.1
   fast-xml-parser: ^5.11.1
   image-size: ^2.0.4
@@ -21,3 +21,7 @@ overrides:
   picomatch: ^4.0.7
   postcss-selector-parser: ^7.1.6
   yaml: ^2.9.1
+  source-map-js: ^1.2.2
+  sharp: ^0.35.5
+  katex: ^0.18.2
+  zod: ^4.6.6
