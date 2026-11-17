@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "apiary"
+abstract: "Keeps a team of AI coding agents working when one of them crashes: a stopped worker's job is handed to another, and each job is retried a limited number of times."
+type: software
+authors:
+  - family-names: "Kusch"
+    given-names: "Patricia"
+repository-code: "https://github.com/patkusch/apiary"
+license: MIT
